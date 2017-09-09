@@ -1,0 +1,12 @@
+[package]
+name = "gb-rw-host"
+version = "0.1.0"
+authors = ["Dhole <dhole@openmailbox.org>"]
+
+[dependencies]
+serial = "0.4"
+clap = "2.26.0"
+bufstream = "0.1.3"
+num = "0.1.40"
+enum_primitive = "*"
+time = "0.1"
