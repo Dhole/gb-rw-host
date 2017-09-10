@@ -13,6 +13,7 @@ use std::io::{Error, ErrorKind};
 // use std::io::{BufReader, BufWriter};
 use std::time::Duration;
 use std::process;
+use std::fs;
 use std::fs::OpenOptions;
 use std::fs::File;
 //use std::path::Path;
@@ -177,7 +178,11 @@ fn main() {
     });
 
     let mut port = BufStream::new(port_raw);
-    gb_rw(&mut port, mode, path).unwrap();
+    gb_rw(&mut port, mode, path).unwrap_or_else(|e| {
+        println!("Error during operation: {}", e);
+        process::exit(1);
+    });
+
 }
 
 /// port_clear will reset the port timeout!
@@ -290,12 +295,22 @@ fn gb_rw<T: SerialPort>(
     };
     println!();
 
-    return match mode {
-        Mode::ReadROM => read(Memory::Rom, &mut port, file),
-        m => Err(Error::new(
+    let result = match mode {
+        Mode::ReadROM => read(Memory::Rom, &mut port, &file),
+        ref m => Err(Error::new(
             ErrorKind::Other,
             format!("Error: operation mode {:?} not implemented yet", m),
         )),
+    };
+
+    return if mode == Mode::ReadROM || mode == Mode::ReadRAM {
+        result.map_err(|e| {
+            drop(file);
+            fs::remove_file(path).unwrap_or(());
+            return e;
+        })
+    } else {
+        result
     };
 
     //let mut ack = vec![0];
@@ -314,7 +329,7 @@ fn gb_rw<T: SerialPort>(
 fn read<T: SerialPort>(
     memory: Memory,
     mut port: &mut BufStream<T>,
-    mut file: File,
+    mut file: &File,
 ) -> Result<(), io::Error> {
 
     // Read Bank 00
@@ -328,8 +343,8 @@ fn read<T: SerialPort>(
     port.read_exact(&mut buf)?;
 
     println!();
-    print_hex(&buf[0x0000..0x0200], 0x0000);
-    println!();
+    //print_hex(&buf[0x0000..0x0200], 0x0000);
+    //println!();
 
     let header_info = match parse_header(&buf) {
         Ok(header_info) => header_info,
@@ -365,10 +380,10 @@ fn read<T: SerialPort>(
             let addr_end = 0x8000 as u16;
             for bank in 1..header_info.rom_banks {
                 if bank != 1 {
-                    println!("Switching to bank {:002}", bank);
+                    println!("Switching to bank {:03}", bank);
                     // TODO: Switch bank
                 }
-                println!("Reading bank {:002}", bank);
+                println!("Reading bank {:03}", bank);
                 port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
                 port.flush()?;
 
@@ -376,10 +391,24 @@ fn read<T: SerialPort>(
                 port.read_exact(&mut buf)?;
                 mem.extend_from_slice(&buf);
             }
-            // TODO: Verify global checksum
+            println!();
+            let global_checksum = global_checksum(&mem);
+            if header_info.global_checksum != global_checksum {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "Global checksum mismatch: {:02x} != {:02x}",
+                        header_info.global_checksum,
+                        global_checksum
+                    ),
+                ));
+            } else {
+                println!("Global checksum verification successfull!");
+            }
         }
         Memory::Ram => (),
     }
+    println!("Writing file...");
     file.write_all(&mem)?;
 
     return Ok(());

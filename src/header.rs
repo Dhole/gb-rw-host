@@ -275,6 +275,16 @@ pub fn header_checksum(bank: &[u8]) -> u8 {
     return c.0;
 }
 
+pub fn global_checksum(rom: &[u8]) -> u16 {
+    let mut c = Wrapping(0u16);
+    for b in rom {
+        c += Wrapping(*b as u16);
+    }
+    c -= Wrapping(rom[0x014E] as u16);
+    c -= Wrapping(rom[0x014F] as u16);
+    return c.0;
+}
+
 pub fn print_header(header_info: &HeaderInfo) {
     println!("ROM Title: {}", header_info.title);
     println!("Color Gameboy compatibility: {:?}", header_info.cgb);
