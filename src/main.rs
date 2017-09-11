@@ -235,6 +235,7 @@ enum Cmd {
     WriteRaw,
     WriteFlash,
     Erease,
+    Reset,
 }
 }
 
@@ -258,6 +259,12 @@ fn cmd_read(addr_start: u16, addr_end: u16) -> Vec<u8> {
         addr_end_lo,
         addr_end_hi,
     ];
+}
+
+fn cmd_write(addr: u16, data: u8) -> Vec<u8> {
+    let addr_start_lo = (addr & 0xff) as u8;
+    let addr_start_hi = ((addr & 0xff00) >> 8) as u8;
+    return vec![Cmd::Write as u8, addr_start_lo, addr_start_hi, data, 0x00];
 }
 
 fn gb_rw<T: SerialPort>(
@@ -295,8 +302,15 @@ fn gb_rw<T: SerialPort>(
     };
     println!();
 
+    // Not sure if this is useful
+    port.write_all(
+        vec![Cmd::Reset as u8, 0x00, 0x00, 0x00, 0x00]
+            .as_slice(),
+    )?;
+    port.flush()?;
+
     let result = match mode {
-        Mode::ReadROM => read(Memory::Rom, &mut port, &file),
+        Mode::ReadROM => read(&mut port, &file, Memory::Rom),
         ref m => Err(Error::new(
             ErrorKind::Other,
             format!("Error: operation mode {:?} not implemented yet", m),
@@ -327,9 +341,9 @@ fn gb_rw<T: SerialPort>(
 }
 
 fn read<T: SerialPort>(
-    memory: Memory,
     mut port: &mut BufStream<T>,
     mut file: &File,
+    memory: Memory,
 ) -> Result<(), io::Error> {
 
     // Read Bank 00
@@ -379,10 +393,8 @@ fn read<T: SerialPort>(
             let addr_start = 0x4000 as u16;
             let addr_end = 0x8000 as u16;
             for bank in 1..header_info.rom_banks {
-                if bank != 1 {
-                    println!("Switching to bank {:03}", bank);
-                    // TODO: Switch bank
-                }
+                println!("Switching to bank {:03}", bank);
+                bank_switch(&mut port, &header_info.mem_controller, &memory, bank)?;
                 println!("Reading bank {:03}", bank);
                 port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
                 port.flush()?;
@@ -394,14 +406,19 @@ fn read<T: SerialPort>(
             println!();
             let global_checksum = global_checksum(&mem);
             if header_info.global_checksum != global_checksum {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "Global checksum mismatch: {:02x} != {:02x}",
-                        header_info.global_checksum,
-                        global_checksum
-                    ),
-                ));
+                println!(
+                    "Global checksum mismatch: {:02x} != {:02x}",
+                    header_info.global_checksum,
+                    global_checksum
+                );
+            //return Err(Error::new(
+            //    ErrorKind::Other,
+            //    format!(
+            //        "Global checksum mismatch: {:02x} != {:02x}",
+            //        header_info.global_checksum,
+            //        global_checksum
+            //    ),
+            //));
             } else {
                 println!("Global checksum verification successfull!");
             }
@@ -411,5 +428,45 @@ fn read<T: SerialPort>(
     println!("Writing file...");
     file.write_all(&mem)?;
 
+    return Ok(());
+}
+
+fn bank_switch<T: SerialPort>(
+    mut port: &mut BufStream<T>,
+    mem_controller: &MemController,
+    memory: &Memory,
+    bank: usize,
+) -> Result<(), io::Error> {
+    let mut writes: Vec<(u16, u8)> = Vec::new();
+    match *mem_controller {
+        MemController::Mbc1 => {
+            match *memory {
+                Memory::Rom => {
+                    writes.push((0x6000, 0x00)); // Select ROM Banking Mode for upper two bits
+                    writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
+                    writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
+                }
+                ref mem => {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!("Error: Memory {:?} not implemented yet", mem),
+                    ))
+                }
+            }
+        }
+        ref mc => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "Error: Memory controller {:?} not implemented yet",
+                    mc
+                ),
+            ))
+        }
+    }
+    for (addr, data) in writes {
+        port.write_all(cmd_write(addr, data).as_slice())?;
+    }
+    port.flush()?;
     return Ok(());
 }
