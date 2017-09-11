@@ -39,6 +39,9 @@ enum Mode {
     ReadRAM,
     WriteROM,
     WriteRAM,
+    Erase,
+    Read,
+    Test,
 }
 
 #[derive(Debug, PartialEq)]
@@ -107,6 +110,9 @@ fn main() {
                     "read_RAM" => Ok(()),
                     "write_ROM" => Ok(()),
                     "write_RAM" => Ok(()),
+                    "erase" => Ok(()),
+                    "read" => Ok(()),
+                    "test" => Ok(()),
                     mode => Err(format!("Invalid operation mode: {}", mode)),
                 }),
         )
@@ -133,6 +139,9 @@ fn main() {
         "read_RAM" => Mode::ReadRAM,
         "write_ROM" => Mode::WriteROM,
         "write_RAM" => Mode::WriteRAM,
+        "erase" => Mode::Erase,
+        "read" => Mode::Read,
+        "test" => Mode::Test,
         mode => panic!("Invalid operation mode: {}", mode),
     };
     let path = matches.value_of("file").unwrap();
@@ -299,6 +308,9 @@ fn gb_rw<T: SerialPort>(
             println!("Writing {} into cartridge RAM", path);
             OpenOptions::new().read(true).open(path)?
         }
+        Mode::Erase => OpenOptions::new().read(true).open("/dev/null")?,
+        Mode::Read => OpenOptions::new().read(true).open("/dev/null")?,
+        Mode::Test => OpenOptions::new().read(true).open("/dev/null")?,
     };
     println!();
 
@@ -311,6 +323,9 @@ fn gb_rw<T: SerialPort>(
 
     let result = match mode {
         Mode::ReadROM => read(&mut port, &file, Memory::Rom),
+        Mode::Erase => erase(&mut port),
+        Mode::Read => read(&mut port),
+        Mode::Test => test(&mut port),
         ref m => Err(Error::new(
             ErrorKind::Other,
             format!("Error: operation mode {:?} not implemented yet", m),
@@ -392,16 +407,20 @@ fn read<T: SerialPort>(
             mem.extend_from_slice(&buf);
             let addr_start = 0x4000 as u16;
             let addr_end = 0x8000 as u16;
-            for bank in 1..header_info.rom_banks {
-                println!("Switching to bank {:03}", bank);
-                bank_switch(&mut port, &header_info.mem_controller, &memory, bank)?;
-                println!("Reading bank {:03}", bank);
-                port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
-                port.flush()?;
-
-                let mut buf = vec![0; (addr_end - addr_start) as usize];
-                port.read_exact(&mut buf)?;
-                mem.extend_from_slice(&buf);
+            for bank in 1..(header_info.rom_banks + 1) {
+                // Pipeline requests and reads
+                if bank != header_info.rom_banks {
+                    println!("Switching to bank {:03}", bank);
+                    bank_switch(&mut port, &header_info.mem_controller, &memory, bank)?;
+                    println!("Reading bank {:03}", bank);
+                    port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+                    port.flush()?;
+                }
+                if bank != 1 {
+                    let mut buf = vec![0; (addr_end - addr_start) as usize];
+                    port.read_exact(&mut buf)?;
+                    mem.extend_from_slice(&buf);
+                }
             }
             println!();
             let global_checksum = global_checksum(&mem);
@@ -439,12 +458,34 @@ fn bank_switch<T: SerialPort>(
 ) -> Result<(), io::Error> {
     let mut writes: Vec<(u16, u8)> = Vec::new();
     match *mem_controller {
+        MemController::None => {
+            if bank != 1 {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "ROM Only cartridges can't select bank",
+                ));
+            }
+        }
         MemController::Mbc1 => {
             match *memory {
                 Memory::Rom => {
                     writes.push((0x6000, 0x00)); // Select ROM Banking Mode for upper two bits
                     writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
                     writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
+                }
+                ref mem => {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!("Error: Memory {:?} not implemented yet", mem),
+                    ))
+                }
+            }
+        }
+        MemController::Mbc5 => {
+            match *memory {
+                Memory::Rom => {
+                    writes.push((0x2000, ((bank as u16) & 0x00ff) as u8)); // Set bank bits 0..7
+                    writes.push((0x3000, (((bank as u16) & 0x0100) >> 8) as u8)); // Set bank bit 8
                 }
                 ref mem => {
                     return Err(Error::new(
@@ -468,5 +509,64 @@ fn bank_switch<T: SerialPort>(
         port.write_all(cmd_write(addr, data).as_slice())?;
     }
     port.flush()?;
+    return Ok(());
+}
+
+fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+
+    //let addr_start = 0x0000 as u16;
+    //let addr_end = 0x4000 as u16;
+    //port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    //port.flush()?;
+
+    //let mut buf = vec![0; (addr_end - addr_start) as usize];
+    //port.read_exact(&mut buf)?;
+
+    //print_hex(&buf[0x0000..0x0400], 0x0000);
+    //println!();
+
+    bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
+
+    let writes = vec![
+        //(0x0AAA, 0xAA),
+        //(0x0555, 0x55),
+        //(0x0AAA, 0x80),
+        //(0x0AAA, 0xAA),
+        //(0x0555, 0x55),
+        //(0x0000, 0x30),
+        //
+        //(0x0A00, 0x07),
+        //(0x3f00, 0x41),
+        //(0x5555, 0xAA),
+        //(0x2AAA, 0x55),
+        //(0x5555, 0x80),
+        //(0x5555, 0xAA),
+        //(0x2AAA, 0x55),
+        //(0x5555, 0x10),
+        //
+        (0x0AAA, 0xA9),
+        (0x0555, 0x56),
+        (0x0AAA, 0x80),
+        (0x0AAA, 0xA9),
+        (0x0555, 0x56),
+        (0x0AAA, 0x10),
+    ];
+
+    for (addr, data) in writes {
+        port.write_all(cmd_write(addr, data).as_slice())?;
+    }
+    port.flush()?;
+
+    // TODO: Wait until data has been ereased (read addr = 0x0000 must be 0xff)
+
+    //port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    //port.flush()?;
+
+    //let mut buf = vec![0; (addr_end - addr_start) as usize];
+    //port.read_exact(&mut buf)?;
+
+    //print_hex(&buf[0x0000..0x0200], 0x0000);
+    //println!();
+
     return Ok(());
 }
