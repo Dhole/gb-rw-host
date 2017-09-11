@@ -18,6 +18,7 @@ use std::fs::OpenOptions;
 use std::fs::File;
 //use std::path::Path;
 use std::process::Command;
+use std::thread;
 
 use std::io::prelude::*;
 use serial::prelude::*;
@@ -324,7 +325,7 @@ fn gb_rw<T: SerialPort>(
     let result = match mode {
         Mode::ReadROM => read(&mut port, &file, Memory::Rom),
         Mode::Erase => erase(&mut port),
-        Mode::Read => read(&mut port),
+        Mode::Read => read_test(&mut port),
         Mode::Test => test(&mut port),
         ref m => Err(Error::new(
             ErrorKind::Other,
@@ -549,7 +550,8 @@ fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
         (0x0AAA, 0x80),
         (0x0AAA, 0xA9),
         (0x0555, 0x56),
-        (0x0AAA, 0x10),
+        (0x0AAA, 0x10), // All
+        //(0x0000, 0x30), // First segment
     ];
 
     for (addr, data) in writes {
@@ -568,5 +570,126 @@ fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
     //print_hex(&buf[0x0000..0x0200], 0x0000);
     //println!();
 
+    return Ok(());
+}
+
+fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+
+    //let addr_start = 0x0000 as u16;
+    //let addr_end = 0x4000 as u16;
+    //port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    //port.flush()?;
+
+    //let mut buf = vec![0; (addr_end - addr_start) as usize];
+    //port.read_exact(&mut buf)?;
+
+    //print_hex(&buf[0x0000..0x0400], 0x0000);
+    //println!();
+
+    bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
+
+    let addr_start = 0x4000 as u16;
+    let addr_end = 0x8000 as u16;
+    port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    port.flush()?;
+
+    let mut buf = vec![0; (addr_end - addr_start) as usize];
+    port.read_exact(&mut buf)?;
+
+    print_hex(&buf[0x0000..0x0400], 0x4000);
+    println!();
+    return Ok(());
+}
+
+fn test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+
+    let mut rom = Vec::new();
+    //let mut file = OpenOptions::new().read(true).open("tetris.gb")?;
+    let mut file = OpenOptions::new().read(true).open("/tmp/pocket.gb")?;
+    file.read_to_end(&mut rom)?;
+
+    for bank in 4..8 {
+        if bank != 0 {
+            bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
+        }
+        let addr_start = if bank == 0 { 0x0000 } else { 0x4000 };
+        let writes = vec![
+            (0x0AAA, 0xA9),
+            (0x0555, 0x56),
+            (0x0AAA, 0xA0),
+            (addr_start, 0xFF),
+        ];
+        for (addr, data) in writes {
+            port.write_all(cmd_write(addr, data).as_slice())?;
+        }
+        port.flush()?;
+        for addr in 0..0x4000 {
+            let writes = vec![
+                (0x0AAA, 0xA9),
+                (0x0555, 0x56),
+                (0x0AAA, 0xA0),
+                (addr_start + addr as u16, rom[bank * 0x4000 + addr]),
+            ];
+            for (addr, data) in writes {
+                port.write_all(cmd_write(addr, data).as_slice())?;
+            }
+            port.flush()?;
+            println!("0x{:04x}", (bank * 0x4000 + addr));
+        }
+        thread::sleep(Duration::from_millis(4000));
+    }
+    //for (addr, b) in rom.iter().enumerate() {
+    //    if ((addr as u16) % 0x2000) == 0 {
+    //        let writes = vec![
+    //            (0x0AAA, 0xA9),
+    //            (0x0555, 0x56),
+    //            (0x0AAA, 0xA0),
+    //            (addr as u16, 0xFF),
+    //        ];
+    //        for (addr, data) in writes {
+    //            port.write_all(cmd_write(addr, data).as_slice())?;
+    //        }
+    //        port.flush()?;
+    //        println!("0x{:04x}", addr as u16);
+    //    }
+    //    let writes = vec![
+    //        (0x0AAA, 0xA9),
+    //        (0x0555, 0x56),
+    //        (0x0AAA, 0xA0),
+    //        (addr as u16, *b),
+    //    ];
+    //    for (addr, data) in writes {
+    //        port.write_all(cmd_write(addr, data).as_slice())?;
+    //    }
+    //    port.flush()?;
+    //    //println!("{}%", (addr as f64) / (rom.len() as f64));
+    //    //println!("0x{:04x}", addr as u16);
+    //}
+
+    //let writes = vec![
+    //    (0x0AAA, 0xA9),
+    //    (0x0555, 0x56),
+    //    (0x0AAA, 0xA0),
+    //    (0x4000, 0xFF),
+    //    (0x0AAA, 0xA9),
+    //    (0x0555, 0x56),
+    //    (0x0AAA, 0xA0),
+    //    (0x4000, 0x41),
+    //];
+    //for (addr, data) in writes {
+    //    port.write_all(cmd_write(addr, data).as_slice())?;
+    //}
+    //port.flush()?;
+
+    //let addr_start = 0x0000 as u16;
+    //let addr_end = 0x4000 as u16;
+    //port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    //port.flush()?;
+
+    //let mut buf = vec![0; (addr_end - addr_start) as usize];
+    //port.read_exact(&mut buf)?;
+
+    //print_hex(&buf[0x0000..0x0200], 0x0000);
+    //println!();
     return Ok(());
 }
