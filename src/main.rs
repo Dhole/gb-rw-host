@@ -246,6 +246,16 @@ enum Cmd {
     WriteFlash,
     Erease,
     Reset,
+    Ping
+}
+}
+
+enum_from_primitive! {
+#[derive(Debug, PartialEq)]
+enum CmdReply {
+    DMAReady,
+    DMANotReady,
+    Pong
 }
 }
 
@@ -275,6 +285,24 @@ fn cmd_write(addr: u16, data: u8) -> Vec<u8> {
     let addr_start_lo = (addr & 0xff) as u8;
     let addr_start_hi = ((addr & 0xff00) >> 8) as u8;
     return vec![Cmd::Write as u8, addr_start_lo, addr_start_hi, data, 0x00];
+}
+
+fn cmd_write_flash(addr_start: u16, addr_end: u16) -> Vec<u8> {
+    let addr_start_lo = (addr_start & 0xff) as u8;
+    let addr_start_hi = ((addr_start & 0xff00) >> 8) as u8;
+    let addr_end_lo = (addr_end & 0xff) as u8;
+    let addr_end_hi = ((addr_end & 0xff00) >> 8) as u8;
+    return vec![
+        Cmd::WriteFlash as u8,
+        addr_start_lo,
+        addr_start_hi,
+        addr_end_lo,
+        addr_end_hi,
+    ];
+}
+
+fn cmd_ping() -> Vec<u8> {
+    return vec![Cmd::Ping as u8, 0x00, 0x00, 0x00, 0x00];
 }
 
 fn gb_rw<T: SerialPort>(
@@ -326,7 +354,8 @@ fn gb_rw<T: SerialPort>(
         Mode::ReadROM => read(&mut port, &file, Memory::Rom),
         Mode::Erase => erase(&mut port),
         Mode::Read => read_test(&mut port),
-        Mode::Test => test(&mut port),
+        Mode::Test => test3(&mut port),
+        Mode::WriteROM => write_flash(&mut port, &file),
         ref m => Err(Error::new(
             ErrorKind::Other,
             format!("Error: operation mode {:?} not implemented yet", m),
@@ -514,37 +543,15 @@ fn bank_switch<T: SerialPort>(
 }
 
 fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+    erase_flash(&mut port)?;
+    return Ok(());
+}
 
-    //let addr_start = 0x0000 as u16;
-    //let addr_end = 0x4000 as u16;
-    //port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
-    //port.flush()?;
-
-    //let mut buf = vec![0; (addr_end - addr_start) as usize];
-    //port.read_exact(&mut buf)?;
-
-    //print_hex(&buf[0x0000..0x0400], 0x0000);
-    //println!();
+fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
 
     bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
 
     let writes = vec![
-        //(0x0AAA, 0xAA),
-        //(0x0555, 0x55),
-        //(0x0AAA, 0x80),
-        //(0x0AAA, 0xAA),
-        //(0x0555, 0x55),
-        //(0x0000, 0x30),
-        //
-        //(0x0A00, 0x07),
-        //(0x3f00, 0x41),
-        //(0x5555, 0xAA),
-        //(0x2AAA, 0x55),
-        //(0x5555, 0x80),
-        //(0x5555, 0xAA),
-        //(0x2AAA, 0x55),
-        //(0x5555, 0x10),
-        //
         (0x0AAA, 0xA9),
         (0x0555, 0x56),
         (0x0AAA, 0x80),
@@ -554,21 +561,23 @@ fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
         //(0x0000, 0x30), // First segment
     ];
 
+    println!("Erasing flash, wait...");
     for (addr, data) in writes {
         port.write_all(cmd_write(addr, data).as_slice())?;
     }
     port.flush()?;
 
-    // TODO: Wait until data has been ereased (read addr = 0x0000 must be 0xff)
-
-    //port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
-    //port.flush()?;
-
-    //let mut buf = vec![0; (addr_end - addr_start) as usize];
-    //port.read_exact(&mut buf)?;
-
-    //print_hex(&buf[0x0000..0x0200], 0x0000);
-    //println!();
+    loop {
+        thread::sleep(Duration::from_millis(500));
+        port.write_all(cmd_read(0x0000, 0x0001).as_slice())?;
+        port.flush()?;
+        let mut buf = vec![0; 1];
+        port.read_exact(&mut buf)?;
+        if buf[0] == 0xFF {
+            break;
+        }
+    }
+    println!("OK!");
 
     return Ok(());
 }
@@ -588,6 +597,17 @@ fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error
 
     bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
 
+    let addr_start = 0x0000 as u16;
+    let addr_end = 0x4000 as u16;
+    port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    port.flush()?;
+
+    let mut buf = vec![0; (addr_end - addr_start) as usize];
+    port.read_exact(&mut buf)?;
+
+    print_hex(&buf[0x0000..0x0200], 0x0000);
+    println!();
+
     let addr_start = 0x4000 as u16;
     let addr_end = 0x8000 as u16;
     port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
@@ -596,19 +616,19 @@ fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error
     let mut buf = vec![0; (addr_end - addr_start) as usize];
     port.read_exact(&mut buf)?;
 
-    print_hex(&buf[0x0000..0x0400], 0x4000);
+    print_hex(&buf[0x0000..0x0200], 0x4000);
     println!();
     return Ok(());
 }
 
-fn test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+fn test1<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
 
     let mut rom = Vec::new();
     //let mut file = OpenOptions::new().read(true).open("tetris.gb")?;
-    let mut file = OpenOptions::new().read(true).open("/tmp/pocket.gb")?;
+    let mut file = OpenOptions::new().read(true).open("/tmp/fbgb_v2/fbgb.gb")?;
     file.read_to_end(&mut rom)?;
 
-    for bank in 4..8 {
+    for bank in 0..2 {
         if bank != 0 {
             bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
         }
@@ -692,4 +712,124 @@ fn test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
     //print_hex(&buf[0x0000..0x0200], 0x0000);
     //println!();
     return Ok(());
+}
+
+fn test2<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+
+    bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
+    let writes = vec![
+        (0x0AAA, 0xA9),
+        (0x0555, 0x56),
+        (0x0AAA, 0xA0),
+        (0x0001, 0x42),
+    ];
+    for (addr, data) in writes {
+        port.write_all(cmd_write(addr, data).as_slice())?;
+    }
+    port.flush()?;
+
+    return Ok(());
+}
+
+fn write_flash<T: SerialPort>(
+    mut port: &mut BufStream<T>,
+    mut file: &File,
+) -> Result<(), io::Error> {
+
+    let mut rom = Vec::new();
+    file.read_to_end(&mut rom)?;
+
+    let header_info = match parse_header(&rom) {
+        Ok(header_info) => header_info,
+        Err(e) => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Error parsing rom header: {:?}", e),
+            ));
+        }
+    };
+
+    println!("ROM header info:");
+    println!();
+    print_header(&header_info);
+    println!();
+
+    match header_info.mem_controller {
+        MemController::None => (),
+        MemController::Mbc1 => {
+            if header_info.rom_banks > 0x1f {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
+                        0x1f,
+                        header_info.rom_banks
+                    ),
+                ));
+            }
+        }
+        MemController::Mbc5 => (),
+        ref mc => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("{:?} is not MBC5-compatible", mc),
+            ));
+        }
+    }
+
+    erase_flash(&mut port)?;
+    println!();
+
+    let mut reply = vec![0; 1];
+    for bank in 0..header_info.rom_banks {
+        if bank != 0 {
+            println!("Switching to bank {:03}", bank);
+            bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
+        }
+        let addr_start = if bank == 0 { 0x0000 } else { 0x4000 };
+
+        loop {
+            port.write_all(
+                cmd_write_flash(addr_start, addr_start + 0x4000)
+                    .as_slice(),
+            )?;
+            port.flush()?;
+
+            port.read_exact(&mut reply)?;
+            if reply[0] == CmdReply::DMAReady as u8 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        println!("Writing bank {:03}...", bank);
+        port.write_all(&rom[bank * 0x4000..bank * 0x4000 + 0x4000])?;
+        port.flush()?;
+    }
+
+    println!("Waiting for confirmation...");
+    port.write_all(cmd_ping().as_slice())?;
+    port.flush()?;
+    port.read_exact(&mut reply)?;
+    if reply[0] == CmdReply::Pong as u8 {
+        println!("OK!");
+        return Ok(());
+    } else {
+        return Err(Error::new(ErrorKind::Other, "Unexpected reply to ping"));
+    }
+}
+
+fn test3<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+    let mut reply = vec![0; 1];
+    println!("Awaiting confirmation...");
+    port.write_all(
+        vec![0x06, 0x00, 0x00, 0x00, 0x00].as_slice(),
+    )?;
+    port.flush()?;
+    port.read_exact(&mut reply)?;
+    if reply[0] == CmdReply::Pong as u8 {
+        println!("OK!");
+        return Ok(());
+    } else {
+        return Err(Error::new(ErrorKind::Other, "Unexpected reply to ping"));
+    }
 }
