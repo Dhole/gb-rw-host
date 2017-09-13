@@ -5,6 +5,7 @@ extern crate serial;
 extern crate clap;
 extern crate bufstream;
 extern crate time;
+extern crate zip;
 
 extern crate gb_rw_host;
 
@@ -16,14 +17,16 @@ use std::process;
 use std::fs;
 use std::fs::OpenOptions;
 use std::fs::File;
-//use std::path::Path;
+use std::path::Path;
 use std::process::Command;
 use std::thread;
+use std::ffi::OsStr;
 
 use std::io::prelude::*;
 use serial::prelude::*;
 use bufstream::BufStream;
 use clap::{App, Arg};
+use zip::read::ZipArchive;
 
 use gb_rw_host::header::*;
 use gb_rw_host::utils::*;
@@ -145,7 +148,7 @@ fn main() {
         "test" => Mode::Test,
         mode => panic!("Invalid operation mode: {}", mode),
     };
-    let path = matches.value_of("file").unwrap();
+    let path = Path::new(matches.value_of("file").unwrap());
 
     println!("Development board is: {:?}", board);
     println!("Using serial device: {} at baud rate: {}", serial, baud);
@@ -176,7 +179,7 @@ fn main() {
     });
 
     port_raw
-        .set_timeout(Duration::from_secs(3600 * 24))
+        .set_timeout(Duration::from_secs(8))
         .unwrap_or_else(|e| {
             println!("Error setting timeout for {}: {}", serial, e);
             process::exit(1);
@@ -301,6 +304,20 @@ fn cmd_write_flash(addr_start: u16, addr_end: u16) -> Vec<u8> {
     ];
 }
 
+fn cmd_write_raw(addr_start: u16, addr_end: u16) -> Vec<u8> {
+    let addr_start_lo = (addr_start & 0xff) as u8;
+    let addr_start_hi = ((addr_start & 0xff00) >> 8) as u8;
+    let addr_end_lo = (addr_end & 0xff) as u8;
+    let addr_end_hi = ((addr_end & 0xff00) >> 8) as u8;
+    return vec![
+        Cmd::WriteRaw as u8,
+        addr_start_lo,
+        addr_start_hi,
+        addr_end_lo,
+        addr_end_hi,
+    ];
+}
+
 fn cmd_ping() -> Vec<u8> {
     return vec![Cmd::Ping as u8, 0x00, 0x00, 0x00, 0x00];
 }
@@ -308,7 +325,7 @@ fn cmd_ping() -> Vec<u8> {
 fn gb_rw<T: SerialPort>(
     mut port: &mut BufStream<T>,
     mode: Mode,
-    path: &str,
+    path: &Path,
 ) -> Result<(), io::Error> {
     let mut buf = Vec::new();
     loop {
@@ -320,51 +337,68 @@ fn gb_rw<T: SerialPort>(
     }
     println!("Connected!");
 
-    let file = match mode {
-        Mode::ReadROM => {
-            println!("Reading cartridge ROM into {}", path);
-            OpenOptions::new().write(true).create_new(true).open(path)?
-        }
-        Mode::ReadRAM => {
-            println!("Reading cartridge RAM into {}", path);
-            OpenOptions::new().write(true).create_new(true).open(path)?
-        }
-        Mode::WriteROM => {
-            println!("Writing {} into cartridge ROM", path);
-            OpenOptions::new().read(true).open(path)?
-        }
-        Mode::WriteRAM => {
-            println!("Writing {} into cartridge RAM", path);
-            OpenOptions::new().read(true).open(path)?
-        }
-        Mode::Erase => OpenOptions::new().read(true).open("/dev/null")?,
-        Mode::Read => OpenOptions::new().read(true).open("/dev/null")?,
-        Mode::Test => OpenOptions::new().read(true).open("/dev/null")?,
-    };
-    println!();
-
     // Not sure if this is useful
-    port.write_all(
-        vec![Cmd::Reset as u8, 0x00, 0x00, 0x00, 0x00]
-            .as_slice(),
-    )?;
-    port.flush()?;
+    //port.write_all(
+    //    vec![Cmd::Reset as u8, 0x00, 0x00, 0x00, 0x00]
+    //        .as_slice(),
+    //)?;
+    //port.flush()?;
 
     let result = match mode {
-        Mode::ReadROM => read(&mut port, &file, Memory::Rom),
+        Mode::ReadROM => {
+            println!("Reading cartridge ROM into {}", path.display());
+            let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+            read(&mut port, &file, Memory::Rom)
+        }
+        Mode::ReadRAM => {
+            println!("Reading cartridge RAM into {}", path.display());
+            let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+            read(&mut port, &file, Memory::Ram)
+        }
+        Mode::WriteROM => {
+            println!("Writing {} into cartridge ROM", path.display());
+            let mut rom = Vec::new();
+            if path.extension() == Some(OsStr::new("zip")) {
+                let mut zip = ZipArchive::new(File::open(path)?)?;
+                for i in 0..zip.len() {
+                    let mut zip_file = zip.by_index(i).unwrap();
+                    let filename = zip_file.name().to_string();
+                    let extension = Path::new(&filename).extension();
+                    if extension == Some(OsStr::new("gb")) || extension == Some(OsStr::new("gbc")) {
+                        zip_file.read_to_end(&mut rom)?;;
+                        break;
+                    }
+                }
+                if rom.len() == 0 {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!("File {} doesn't contain any ROM", path.display()),
+                    ));
+                }
+            } else {
+                OpenOptions::new().read(true).open(path)?.read_to_end(
+                    &mut rom,
+                )?;
+            }
+            write_flash(&mut port, &rom)
+        }
+        Mode::WriteRAM => {
+            println!("Writing {} into cartridge RAM", path.display());
+            let mut rom = Vec::new();
+            OpenOptions::new().read(true).open(path)?.read_to_end(
+                &mut rom,
+            )?;
+            write_ram(&mut port, &rom)
+        }
         Mode::Erase => erase(&mut port),
         Mode::Read => read_test(&mut port),
         Mode::Test => test3(&mut port),
-        Mode::WriteROM => write_flash(&mut port, &file),
-        ref m => Err(Error::new(
-            ErrorKind::Other,
-            format!("Error: operation mode {:?} not implemented yet", m),
-        )),
     };
+    println!();
 
     return if mode == Mode::ReadROM || mode == Mode::ReadRAM {
         result.map_err(|e| {
-            drop(file);
+            //drop(file);
             fs::remove_file(path).unwrap_or(());
             return e;
         })
@@ -392,7 +426,7 @@ fn read<T: SerialPort>(
 ) -> Result<(), io::Error> {
 
     // Read Bank 00
-    println!("Reading bank 000");
+    println!("Reading ROM bank 000");
     let addr_start = 0x0000 as u16;
     let addr_end = 0x4000 as u16;
     port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
@@ -440,9 +474,9 @@ fn read<T: SerialPort>(
             for bank in 1..(header_info.rom_banks + 1) {
                 // Pipeline requests and reads
                 if bank != header_info.rom_banks {
-                    println!("Switching to bank {:03}", bank);
-                    bank_switch(&mut port, &header_info.mem_controller, &memory, bank)?;
-                    println!("Reading bank {:03}", bank);
+                    println!("Switching to ROM bank {:03}", bank);
+                    switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
+                    println!("Reading ROM bank {:03}", bank);
                     port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
                     port.flush()?;
                 }
@@ -460,27 +494,42 @@ fn read<T: SerialPort>(
                     header_info.global_checksum,
                     global_checksum
                 );
-            //return Err(Error::new(
-            //    ErrorKind::Other,
-            //    format!(
-            //        "Global checksum mismatch: {:02x} != {:02x}",
-            //        header_info.global_checksum,
-            //        global_checksum
-            //    ),
-            //));
             } else {
                 println!("Global checksum verification successfull!");
             }
         }
-        Memory::Ram => (),
+        Memory::Ram => {
+            ram_enable(&mut port)?;
+            let addr_start = 0xA000 as u16;
+            let addr_end = if header_info.ram_size < 0x2000 {
+                0xA000 + header_info.ram_size as u16
+            } else {
+                0xC000 as u16
+            };
+            for bank in 0..(header_info.ram_banks + 1) {
+                // Pipeline requests and reads
+                if bank != header_info.ram_banks {
+                    println!("Switching to RAM bank {:03}", bank);
+                    switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
+                    println!("Reading RAM bank {:03}", bank);
+                    port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+                    port.flush()?;
+                }
+                if bank != 0 {
+                    let mut buf = vec![0; (addr_end - addr_start) as usize];
+                    port.read_exact(&mut buf)?;
+                    mem.extend_from_slice(&buf);
+                }
+            }
+            println!();
+            ram_disable(&mut port)?;
+        }
     }
     println!("Writing file...");
-    file.write_all(&mem)?;
-
-    return Ok(());
+    return file.write_all(&mem);
 }
 
-fn bank_switch<T: SerialPort>(
+fn switch_bank<T: SerialPort>(
     mut port: &mut BufStream<T>,
     mem_controller: &MemController,
     memory: &Memory,
@@ -503,11 +552,9 @@ fn bank_switch<T: SerialPort>(
                     writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
                     writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
                 }
-                ref mem => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!("Error: Memory {:?} not implemented yet", mem),
-                    ))
+                Memory::Ram => {
+                    writes.push((0x6000, 0x01)); // Select RAM Banking Mode
+                    writes.push((0x4000, (bank as u8) & 0x03)); // Set bank bits 0..4
                 }
             }
         }
@@ -517,11 +564,8 @@ fn bank_switch<T: SerialPort>(
                     writes.push((0x2000, ((bank as u16) & 0x00ff) as u8)); // Set bank bits 0..7
                     writes.push((0x3000, (((bank as u16) & 0x0100) >> 8) as u8)); // Set bank bit 8
                 }
-                ref mem => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!("Error: Memory {:?} not implemented yet", mem),
-                    ))
+                Memory::Ram => {
+                    writes.push((0x4000, (bank as u8) & 0x0f)); // Set bank bits 0..4
                 }
             }
         }
@@ -542,14 +586,23 @@ fn bank_switch<T: SerialPort>(
     return Ok(());
 }
 
+fn ram_enable<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+    port.write_all(cmd_write(0x0000, 0x0A).as_slice())?;
+    return port.flush();
+}
+
+fn ram_disable<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+    port.write_all(cmd_write(0x0000, 0x00).as_slice())?;
+    return port.flush();
+}
+
 fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
-    erase_flash(&mut port)?;
-    return Ok(());
+    return erase_flash(&mut port);
 }
 
 fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
 
-    bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
+    switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
 
     let writes = vec![
         (0x0AAA, 0xA9),
@@ -595,7 +648,7 @@ fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error
     //print_hex(&buf[0x0000..0x0400], 0x0000);
     //println!();
 
-    bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
+    switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
 
     let addr_start = 0x0000 as u16;
     let addr_end = 0x4000 as u16;
@@ -630,7 +683,7 @@ fn test1<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
 
     for bank in 0..2 {
         if bank != 0 {
-            bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
+            switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
         }
         let addr_start = if bank == 0 { 0x0000 } else { 0x4000 };
         let writes = vec![
@@ -716,7 +769,7 @@ fn test1<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
 
 fn test2<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
 
-    bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
+    switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
     let writes = vec![
         (0x0AAA, 0xA9),
         (0x0555, 0x56),
@@ -731,15 +784,110 @@ fn test2<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
     return Ok(());
 }
 
+fn write_ram<T: SerialPort>(mut port: &mut BufStream<T>, sav: &[u8]) -> Result<(), io::Error> {
+
+    // Read Bank 00
+    println!("Reading ROM bank 000");
+    let addr_start = 0x0000 as u16;
+    let addr_end = 0x4000 as u16;
+    port.write_all(cmd_read(addr_start, addr_end).as_slice())?;
+    port.flush()?;
+
+    let mut buf = vec![0; (addr_end - addr_start) as usize];
+    port.read_exact(&mut buf)?;
+
+    println!();
+
+    let header_info = match parse_header(&buf) {
+        Ok(header_info) => header_info,
+        Err(e) => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Error parsing cartridge header: {:?}", e),
+            ));
+        }
+    };
+
+    let header_checksum = header_checksum(&buf);
+
+    if header_info.checksum != header_checksum {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "Header checksum mismatch: {:02x} != {:02x}",
+                header_info.checksum,
+                header_checksum
+            ),
+        ));
+    }
+
+    if sav.len() != header_info.ram_size {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "RAM size mismatch between header and file: {:02x} != {:02x}",
+                header_info.ram_size,
+                sav.len()
+            ),
+        ));
+    }
+
+    ram_enable(&mut port)?;
+    let addr_start = 0xA000 as u16;
+    let addr_end = if header_info.ram_size < 0x2000 {
+        0xA000 + header_info.ram_size as u16
+    } else {
+        0xC000 as u16
+    };
+    let bank_len = (addr_end - addr_start) as usize;
+    println!("addr_end = {}", addr_end);
+    let mut reply = vec![0; 1];
+    for bank in 0..header_info.ram_banks {
+        if bank != 0 {
+            println!("Switching to ROM bank {:03}", bank);
+            switch_bank(&mut port, &header_info.mem_controller, &Memory::Ram, bank)?;
+        }
+
+        loop {
+            port.write_all(
+                cmd_write_raw(addr_start, addr_end).as_slice(),
+            )?;
+            port.flush()?;
+
+            port.read_exact(&mut reply)?;
+            if reply[0] == CmdReply::DMAReady as u8 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        println!("Writing RAM bank {:03}...", bank);
+        port.write_all(
+            &sav[bank * 0x2000..bank * 0x2000 + bank_len],
+        )?;
+        port.flush()?;
+    }
+
+    ram_disable(&mut port)?;
+
+    println!("Waiting for confirmation...");
+    port.write_all(cmd_ping().as_slice())?;
+    port.flush()?;
+    port.read_exact(&mut reply)?;
+    if reply[0] == CmdReply::Pong as u8 {
+        println!("OK!");
+        return Ok(());
+    } else {
+        return Err(Error::new(ErrorKind::Other, "Unexpected reply to ping"));
+    }
+}
+
 fn write_flash<T: SerialPort>(
     mut port: &mut BufStream<T>,
-    mut file: &File,
+    //mut file: &File,
+    rom: &[u8],
 ) -> Result<(), io::Error> {
 
-    let mut rom = Vec::new();
-    file.read_to_end(&mut rom)?;
-
-    let header_info = match parse_header(&rom) {
+    let header_info = match parse_header(rom) {
         Ok(header_info) => header_info,
         Err(e) => {
             return Err(Error::new(
@@ -757,7 +905,7 @@ fn write_flash<T: SerialPort>(
     match header_info.mem_controller {
         MemController::None => (),
         MemController::Mbc1 => {
-            if header_info.rom_banks > 0x1f {
+            if header_info.rom_banks > 0x20 {
                 return Err(Error::new(
                     ErrorKind::Other,
                     format!(
@@ -783,8 +931,8 @@ fn write_flash<T: SerialPort>(
     let mut reply = vec![0; 1];
     for bank in 0..header_info.rom_banks {
         if bank != 0 {
-            println!("Switching to bank {:03}", bank);
-            bank_switch(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
+            println!("Switching to ROM bank {:03}", bank);
+            switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
         }
         let addr_start = if bank == 0 { 0x0000 } else { 0x4000 };
 
@@ -801,7 +949,7 @@ fn write_flash<T: SerialPort>(
             }
             thread::sleep(Duration::from_millis(100));
         }
-        println!("Writing bank {:03}...", bank);
+        println!("Writing ROM bank {:03}...", bank);
         port.write_all(&rom[bank * 0x4000..bank * 0x4000 + 0x4000])?;
         port.flush()?;
     }

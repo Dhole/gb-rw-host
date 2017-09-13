@@ -126,8 +126,8 @@ pub struct HeaderInfo {
     pub cart_type: CartType,
     pub mem_controller: MemController,
     pub rom_banks: usize,
-    pub ram_banks: usize, // in KiB
-    pub ram_size: usize, // in KiB
+    pub ram_banks: usize,
+    pub ram_size: usize,
     pub destination: Destination,
     pub checksum: u8,
     pub global_checksum: u16,
@@ -198,7 +198,7 @@ fn ram_size_to_usize(ram_size: RamSize) -> usize {
         RamSize::KB032 => 32,
         RamSize::KB128 => 128,
         RamSize::KB064 => 64,
-    };
+    } * 1024;
 }
 
 pub fn parse_header(bank: &[u8]) -> Result<HeaderInfo, HeaderError> {
@@ -232,7 +232,7 @@ pub fn parse_header(bank: &[u8]) -> Result<HeaderInfo, HeaderError> {
         Some(ram_size) => ram_size_to_usize(ram_size),
         None => return Err(HeaderError::UnknownRamSize),
     };
-    let ram_banks = utils::div_round_up(ram_size, 8);
+    let ram_banks = utils::div_round_up(ram_size, 0x2000);
 
     let destination = match Destination::from_u8(bank[0x014A]) {
         Some(d) => d,
