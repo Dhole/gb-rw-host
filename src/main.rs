@@ -199,7 +199,7 @@ fn main() {
 }
 
 /// port_clear will reset the port timeout!
-fn port_clear<T: SerialPort>(mut port: &mut T) -> Result<(), io::Error> {
+fn port_clear<T: SerialPort>(port: &mut T) -> Result<(), io::Error> {
     port.set_timeout(Duration::from_millis(100))?;
     let mut buf = vec![0; 16];
     loop {
@@ -530,7 +530,7 @@ fn read<T: SerialPort>(
 }
 
 fn switch_bank<T: SerialPort>(
-    mut port: &mut BufStream<T>,
+    port: &mut BufStream<T>,
     mem_controller: &MemController,
     memory: &Memory,
     bank: usize,
@@ -586,12 +586,12 @@ fn switch_bank<T: SerialPort>(
     return Ok(());
 }
 
-fn ram_enable<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+fn ram_enable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
     port.write_all(cmd_write(0x0000, 0x0A).as_slice())?;
     return port.flush();
 }
 
-fn ram_disable<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+fn ram_disable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
     port.write_all(cmd_write(0x0000, 0x00).as_slice())?;
     return port.flush();
 }
@@ -627,8 +627,17 @@ fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Err
         let mut buf = vec![0; 1];
         port.read_exact(&mut buf)?;
         if buf[0] == 0xFF {
+            //println!("");
             break;
         }
+        if buf[0] != 0x4c || buf[0] != 0x08 {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Received incorrect erasing status, check the cartridge connection"),
+            ));
+        }
+        //print!("{:02x} ", buf[0]);
+        //io::stdout().flush()?;
     }
     println!("OK!");
 
