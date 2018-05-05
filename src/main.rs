@@ -630,10 +630,13 @@ fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Err
             //println!("");
             break;
         }
-        if buf[0] != 0x4c || buf[0] != 0x08 {
+        if buf[0] != 0x4c && buf[0] != 0x08 {
             return Err(Error::new(
                 ErrorKind::Other,
-                format!("Received incorrect erasing status, check the cartridge connection"),
+                format!(
+                    "Received incorrect erasing status 0x{:02x}, check the cartridge connection",
+                    buf[0]
+                ),
             ));
         }
         //print!("{:02x} ", buf[0]);
