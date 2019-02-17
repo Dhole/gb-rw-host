@@ -1,2 +1,6 @@
 /target/
 **/*.rs.bk
+*.gb
+*.gbc
+*.gba
+*.sav
