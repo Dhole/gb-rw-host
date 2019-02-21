@@ -24,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use bufstream::BufStream;
-use clap::{App, Arg};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use num::iter::range_step;
 use pbr::{ProgressBar, Units};
 use serial::prelude::*;
@@ -41,43 +41,38 @@ enum Board {
 }
 
 #[derive(Debug, PartialEq)]
-enum Mode {
-    ReadROM,
-    ReadRAM,
-    WriteROM,
-    WriteRAM,
-    ReadGBAROM,
-    ReadGBATest,
-    Erase,
-    Read,
-    //    Test,
-}
-
-#[derive(Debug, PartialEq)]
 enum Memory {
     Rom,
     Ram,
 }
 
 fn main() {
-    let matches = App::new("gb-rw")
+    let arg_file = Arg::with_name("file")
+        .help("Set the file to read/write for the cartridge ROM/RAM")
+        .short("f")
+        .long("file")
+        .value_name("FILE")
+        .takes_value(true)
+        .required(true);
+    let mut app = App::new("gb-rw")
         .version("0.1")
         .about("Gameboy cartridge read/writer")
         .author("Dhole")
         .arg(
             Arg::with_name("baud")
-            .help("Set the baud rate")
-            .short("b")
-            .long("baud")
-            .value_name("RATE")
-            //.default_value("115200")
-            .default_value("2000000")
-            .takes_value(true)
-            .required(false)
-            .validator(|baud| match baud.parse::<usize>() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("{}", e)),
-            }),
+                .help("Set the baud rate")
+                .short("b")
+                .long("baud")
+                .value_name("RATE")
+                //.default_value("115200")
+                .default_value("1152000")
+                //.default_value("2000000")
+                .takes_value(true)
+                .required(false)
+                .validator(|baud| match baud.parse::<usize>() {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(format!("{}", e)),
+                }),
         )
         .arg(
             Arg::with_name("serial")
@@ -105,110 +100,52 @@ fn main() {
                 }),
         )
         .arg(
-            Arg::with_name("mode")
-                .help(
-                    "Set the operation mode: read_ROM, read_RAM, write_ROM, write_RAM, read_GBA_ROM",
-                )
-                .short("m")
-                .long("mode")
-                .value_name("MODE")
-                .takes_value(true)
-                .required(true)
-                .validator(|mode| match mode.as_str() {
-                    "read_ROM" => Ok(()),
-                    "read_RAM" => Ok(()),
-                    "write_ROM" => Ok(()),
-                    "write_RAM" => Ok(()),
-                    "read_GBA_ROM" => Ok(()),
-                    "read_GBA_test" => Ok(()),
-                    "erase" => Ok(()),
-                    "read" => Ok(()),
-                    //"test" => Ok(()),
-                    mode => Err(format!("Invalid operation mode: {}", mode)),
-                }),
-        )
-        .arg(
-            Arg::with_name("file")
-                .help("Set the file to read/write for the cartridge ROM/RAM")
-                .short("f")
-                .long("file")
-                .value_name("FILE")
-                .takes_value(true)
-                .required(true),
-        )
-        .arg(
             Arg::with_name("no-reset")
-            .help("Don't reset the development board")
-            .short("n")
-            )
-        .get_matches();
-
-    let serial = matches.value_of("serial").unwrap();
-    let baud = matches.value_of("baud").unwrap().parse::<usize>().unwrap();
-    let board = match matches.value_of("board").unwrap() {
-        "generic" => Board::Generic,
-        "st" => Board::St,
-        board => panic!("Invalid board: {}", board),
-    };
-    let mode = match matches.value_of("mode").unwrap() {
-        "read_ROM" => Mode::ReadROM,
-        "read_RAM" => Mode::ReadRAM,
-        "write_ROM" => Mode::WriteROM,
-        "write_RAM" => Mode::WriteRAM,
-        "read_GBA_ROM" => Mode::ReadGBAROM,
-        "read_GBA_test" => Mode::ReadGBATest,
-        "erase" => Mode::Erase,
-        "read" => Mode::Read,
-        //"test" => Mode::Test,
-        mode => panic!("Invalid operation mode: {}", mode),
-    };
-    let path = Path::new(matches.value_of("file").unwrap());
-    let reset = !matches.is_present("no-reset");
-
-    println!("Development board is: {:?}", board);
-    println!("Using serial device: {} at baud rate: {}", serial, baud);
-
-    let mut port_raw = match serial::open(serial) {
-        Ok(port) => port,
-        Err(e) => {
-            println!("Error opening {}: {}", serial, e);
-            process::exit(1);
-        }
-    };
-    port_raw
-        .configure(&serial::PortSettings {
-            baud_rate: serial::BaudRate::from_speed(baud),
-            char_size: serial::Bits8,
-            parity: serial::ParityNone,
-            stop_bits: serial::Stop1,
-            flow_control: serial::FlowNone,
-        })
-        .unwrap_or_else(|e| {
-            println!("Error configuring {}: {}", serial, e);
-            process::exit(1);
-        });
-
-    port_clear(&mut port_raw).unwrap_or_else(|e| {
-        println!("Error clearing port {}: {}", serial, e);
-        process::exit(1);
-    });
-
-    port_raw
-        .set_timeout(Duration::from_secs(8))
-        .unwrap_or_else(|e| {
-            println!("Error setting timeout for {}: {}", serial, e);
-            process::exit(1);
-        });
-
-    if reset {
-        dev_reset(board).unwrap_or_else(|e| {
-            println!("Error resetting development board: {}", e);
-            process::exit(1);
-        });
+                .help("Don't reset the development board")
+                .short("n"),
+        )
+        .subcommands(vec![
+            SubCommand::with_name("read_ROM")
+                .about("read Gameboy ROM")
+                .arg(arg_file.clone()),
+            SubCommand::with_name("read_RAM")
+                .about("read Gameboy RAM")
+                .arg(arg_file.clone()),
+            SubCommand::with_name("write_ROM")
+                .about("write Gameboy Flash ROM")
+                .arg(arg_file.clone()),
+            SubCommand::with_name("write_RAM")
+                .about("write Gameboy RAM")
+                .arg(arg_file.clone()),
+            SubCommand::with_name("read_GBA_ROM")
+                .about("read Gameboy Advance ROM")
+                .arg(arg_file.clone())
+                .arg(
+                    Arg::with_name("size")
+                        .help("ROM size in MB")
+                        .short("s")
+                        .long("size")
+                        .value_name("SIZE")
+                        .takes_value(true)
+                        .required(true)
+                        .validator(|size| match size.parse::<u32>() {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(format!("{}", e)),
+                        }),
+                ),
+            SubCommand::with_name("read_GBA_test").about("read Gameboy Advance ROM test"),
+            SubCommand::with_name("erease").about("erease Gameboy Flash ROM"),
+            SubCommand::with_name("read")
+                .about("read Gameboy ROM test")
+                .arg(arg_file.clone()),
+        ]);
+    let matches = app.clone().get_matches();
+    if matches.subcommand_name() == None {
+        app.print_help().unwrap();
+        return;
     }
 
-    let mut port = BufStream::new(port_raw);
-    gb_rw(&mut port, mode, path, reset).unwrap_or_else(|e| {
+    run_subcommand(matches).unwrap_or_else(|e| {
         println!("Error during operation: {}", e);
         process::exit(1);
     });
@@ -370,13 +307,55 @@ fn cmd_gba_read(addr_start: u32, addr_end: u32) -> Vec<u8> {
     ];
 }
 
-fn gb_rw<T: SerialPort>(
-    mut port: &mut BufStream<T>,
-    mode: Mode,
-    path: &Path,
-    reset: bool,
-) -> Result<(), io::Error> {
+fn run_subcommand(matches: ArgMatches) -> Result<(), io::Error> {
+    let serial = matches.value_of("serial").unwrap();
+    let baud = matches.value_of("baud").unwrap().parse::<usize>().unwrap();
+    let board = match matches.value_of("board").unwrap() {
+        "generic" => Board::Generic,
+        "st" => Board::St,
+        board => panic!("Invalid board: {}", board),
+    };
+    let reset = !matches.is_present("no-reset");
+
+    println!("Development board is: {:?}", board);
+    println!("Using serial device: {} at baud rate: {}", serial, baud);
+
+    let mut port_raw = match serial::open(serial) {
+        Ok(port) => port,
+        Err(e) => {
+            println!("Error opening {}: {}", serial, e);
+            process::exit(1);
+        }
+    };
+    port_raw
+        .configure(&serial::PortSettings {
+            baud_rate: serial::BaudRate::from_speed(baud),
+            char_size: serial::Bits8,
+            parity: serial::ParityNone,
+            stop_bits: serial::Stop1,
+            flow_control: serial::FlowNone,
+        })
+        .unwrap_or_else(|e| {
+            println!("Error configuring {}: {}", serial, e);
+            process::exit(1);
+        });
+    port_clear(&mut port_raw).unwrap_or_else(|e| {
+        println!("Error clearing port {}: {}", serial, e);
+        process::exit(1);
+    });
+    port_raw
+        .set_timeout(Duration::from_secs(8))
+        .unwrap_or_else(|e| {
+            println!("Error setting timeout for {}: {}", serial, e);
+            process::exit(1);
+        });
+    let mut port = BufStream::new(port_raw);
+
     if reset {
+        dev_reset(board).unwrap_or_else(|e| {
+            println!("Error resetting development board: {}", e);
+            process::exit(1);
+        });
         let mut buf = Vec::new();
         loop {
             try!(port.read_until(b'\n', &mut buf));
@@ -388,25 +367,26 @@ fn gb_rw<T: SerialPort>(
         println!("Connected!");
     }
 
-    // Not sure if this is useful
-    //port.write_all(
-    //    vec![Cmd::Reset as u8, 0x00, 0x00, 0x00, 0x00]
-    //        .as_slice(),
-    //)?;
-    //port.flush()?;
+    let path = Path::new(match matches.subcommand() {
+        ("erase", Some(_)) => "",
+        ("read", Some(_)) => "",
+        ("read_GBA_test", Some(_)) => "",
+        (_, Some(sub_m)) => sub_m.value_of("file").unwrap(),
+        _ => unreachable!(),
+    });
 
-    let result = match mode {
-        Mode::ReadROM => {
+    let result = match matches.subcommand() {
+        ("read_ROM", Some(_)) => {
             println!("Reading cartridge ROM into {}", path.display());
             let file = OpenOptions::new().write(true).create_new(true).open(path)?;
             read(&mut port, &file, Memory::Rom)
         }
-        Mode::ReadRAM => {
+        ("read_RAM", Some(_)) => {
             println!("Reading cartridge RAM into {}", path.display());
             let file = OpenOptions::new().write(true).create_new(true).open(path)?;
             read(&mut port, &file, Memory::Ram)
         }
-        Mode::WriteROM => {
+        ("write_ROM", Some(_)) => {
             println!("Writing {} into cartridge ROM", path.display());
             let mut rom = Vec::new();
             if path.extension() == Some(OsStr::new("zip")) {
@@ -434,7 +414,7 @@ fn gb_rw<T: SerialPort>(
             }
             write_flash(&mut port, &rom)
         }
-        Mode::WriteRAM => {
+        ("write_RAM", Some(_)) => {
             println!("Writing {} into cartridge RAM", path.display());
             let mut rom = Vec::new();
             OpenOptions::new()
@@ -443,30 +423,42 @@ fn gb_rw<T: SerialPort>(
                 .read_to_end(&mut rom)?;
             write_ram(&mut port, &rom)
         }
-        Mode::ReadGBAROM => {
+        ("read_GBA_ROM", Some(sub_m)) => {
             println!("Reading GBA cartridge ROM into {}", path.display());
             let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-            read_gba_rom(&mut port, &file)
+            let size = sub_m.value_of("size").unwrap().parse::<u32>().unwrap();
+            read_gba_rom(&mut port, &file, size)
         }
-        Mode::ReadGBATest => {
+        ("read_GBA_test", Some(_)) => {
             println!("Reading GBA cartridge ROM into stdout");
             read_gba_test(&mut port)
         }
-        Mode::Erase => erase(&mut port),
-        Mode::Read => read_test(&mut port),
-        //Mode::Test => test3(&mut port),
+        ("erase", Some(_)) => erase(&mut port),
+        ("read", Some(_)) => read_test(&mut port),
+        (cmd, _) => {
+            panic!("Unexpected subcommand: {}", cmd);
+        }
     };
+
+    // Not sure if this is useful
+    //port.write_all(
+    //    vec![Cmd::Reset as u8, 0x00, 0x00, 0x00, 0x00]
+    //        .as_slice(),
+    //)?;
+    //port.flush()?;
+
     println!();
 
-    return if mode == Mode::ReadROM || mode == Mode::ReadRAM {
-        result.map_err(|e| {
-            //drop(file);
-            fs::remove_file(path).unwrap_or(());
-            return e;
-        })
-    } else {
-        result
-    };
+    // Error cleanup
+    if result.is_err() {
+        match matches.subcommand_name() {
+            Some("read_ROM") => fs::remove_file(path).unwrap_or(()),
+            Some("read_RAM") => fs::remove_file(path).unwrap_or(()),
+            Some("read_GBA_ROM") => fs::remove_file(path).unwrap_or(()),
+            _ => (),
+        }
+    }
+    result
 
     //let mut ack = vec![0];
     //port.read_exact(&mut ack)?;
@@ -632,7 +624,7 @@ fn switch_bank<T: SerialPort>(
             return Err(Error::new(
                 ErrorKind::Other,
                 format!("Error: Memory controller {:?} not implemented yet", mc),
-            ))
+            ));
         }
     }
     for (addr, data) in writes {
@@ -729,16 +721,20 @@ fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error
     return Ok(());
 }
 
-fn read_gba_rom<T: SerialPort>(port: &mut BufStream<T>, mut file: &File) -> Result<(), io::Error> {
+fn read_gba_rom<T: SerialPort>(
+    port: &mut BufStream<T>,
+    mut file: &File,
+    size: u32,
+) -> Result<(), io::Error> {
     port.write_all(cmd_mode_gba().as_slice())?;
     port.flush()?;
 
-    let mut mem = Vec::new();
+    //let mut mem = Vec::new();
     //let mut addr_start = 0x0001_fe00 as u32;
     let buf_len = 0x4000 as u32;
     let mut buf = vec![0; buf_len as usize];
     //let end: u32 = 0x2_00_00_00;
-    let end: u32 = 8 * 1024 * 1024;
+    let end: u32 = size * 1024 * 1024;
     let mut pb = ProgressBar::new(end as u64);
     pb.set_units(Units::Bytes);
     pb.format("[=> ]");
@@ -748,22 +744,26 @@ fn read_gba_rom<T: SerialPort>(port: &mut BufStream<T>, mut file: &File) -> Resu
         port.flush()?;
 
         port.read_exact(&mut buf)?;
-        mem.extend_from_slice(&buf);
+        file.write_all(&buf)?;
+        //mem.extend_from_slice(&buf);
         pb.add(buf_len as u64);
     }
     pb.finish_print("Reading ROM finished");
-    println!("Writing file...");
-    return file.write_all(&mem);
+    Ok(())
+    //println!("Writing file...");
+    //return file.write_all(&mem);
 }
 
 fn read_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
     port.write_all(cmd_mode_gba().as_slice())?;
     port.flush()?;
 
-    let buf_len = 0x4000;
+    let buf_len = 0x80;
     let mut buf = vec![0; buf_len as usize];
     //for addr_start in range_step(0x1_00_00_00, 0x1_01_00_00, buf_len) {
-    for addr_start in range_step(0x0, 0x4000 * 1, buf_len) {
+    //for addr_start in range_step(0x0, 0x4000 * 1, buf_len) {
+    let start = 0x0000;
+    for addr_start in range_step(start, start + buf_len * 2, buf_len) {
         let addr_end = addr_start + buf_len;
         port.write_all(cmd_gba_read(addr_start, addr_end).as_slice())?;
         port.flush()?;
@@ -771,7 +771,7 @@ fn read_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error
         port.read_exact(&mut buf)?;
 
         println!("=== {:08x} - {:08x} ===", addr_start, addr_end);
-        print_hex(&buf[0x000000..0x000200], 0x0000);
+        print_hex(&buf[0x000000..0x000080], 0x0000);
         println!();
     }
     //for addr_start in range_step(0x00000, 0x01000, buf_len) {
