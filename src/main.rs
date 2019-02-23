@@ -11,7 +11,7 @@ extern crate zip;
 extern crate gb_rw_host;
 
 use std::io;
-use std::io::{Error, ErrorKind};
+use std::io::ErrorKind;
 // use std::io::{BufReader, BufWriter};
 use std::ffi::OsStr;
 use std::fs;
@@ -30,9 +30,29 @@ use pbr::{ProgressBar, Units};
 use serial::prelude::*;
 use std::io::prelude::*;
 use zip::read::ZipArchive;
+use zip::result::ZipError;
 
 use gb_rw_host::header::*;
 use gb_rw_host::utils::*;
+
+#[derive(Debug)]
+pub enum Error {
+    Serial(io::Error),
+    Zip(ZipError),
+    Generic(String),
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::Serial(err)
+    }
+}
+
+impl From<ZipError> for Error {
+    fn from(err: ZipError) -> Self {
+        Error::Zip(err)
+    }
+}
 
 #[derive(Debug, PartialEq)]
 enum Board {
@@ -127,7 +147,7 @@ fn main() {
                         .long("size")
                         .value_name("SIZE")
                         .takes_value(true)
-                        .required(true)
+                        .required(false)
                         .validator(|size| match size.parse::<u32>() {
                             Ok(_) => Ok(()),
                             Err(e) => Err(format!("{}", e)),
@@ -146,7 +166,7 @@ fn main() {
     }
 
     run_subcommand(matches).unwrap_or_else(|e| {
-        println!("Error during operation: {}", e);
+        println!("Error during operation: {:?}", e);
         process::exit(1);
     });
 }
@@ -167,10 +187,10 @@ fn port_clear<T: SerialPort>(port: &mut T) -> Result<(), io::Error> {
             }
         }
     }
-    return Ok(());
+    Ok(())
 }
 
-fn dev_reset(board: Board) -> Result<(), io::Error> {
+fn dev_reset(board: Board) -> Result<(), Error> {
     match board {
         Board::Generic => {
             println!("Press the reset button on the board");
@@ -180,13 +200,10 @@ fn dev_reset(board: Board) -> Result<(), io::Error> {
             let output = Command::new("st-flash").arg("reset").output()?;
             println!("{}", String::from_utf8_lossy(&output.stderr));
             if !output.status.success() {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "st-flash returned with error code {:?}",
-                        output.status.code()
-                    ),
-                ));
+                return Err(Error::Generic(format!(
+                    "st-flash returned with error code {:?}",
+                    output.status.code()
+                )));
             }
         }
     }
@@ -231,19 +248,19 @@ fn cmd_read(addr_start: u16, addr_end: u16) -> Vec<u8> {
     let addr_start_hi = ((addr_start & 0xff00) >> 8) as u8;
     let addr_end_lo = (addr_end & 0xff) as u8;
     let addr_end_hi = ((addr_end & 0xff00) >> 8) as u8;
-    return vec![
+    vec![
         Cmd::Read as u8,
         addr_start_lo,
         addr_start_hi,
         addr_end_lo,
         addr_end_hi,
-    ];
+    ]
 }
 
 fn cmd_write(addr: u16, data: u8) -> Vec<u8> {
     let addr_start_lo = (addr & 0xff) as u8;
     let addr_start_hi = ((addr & 0xff00) >> 8) as u8;
-    return vec![Cmd::Write as u8, addr_start_lo, addr_start_hi, data, 0x00];
+    vec![Cmd::Write as u8, addr_start_lo, addr_start_hi, data, 0x00]
 }
 
 fn cmd_write_flash(addr_start: u16, addr_end: u16) -> Vec<u8> {
@@ -251,13 +268,13 @@ fn cmd_write_flash(addr_start: u16, addr_end: u16) -> Vec<u8> {
     let addr_start_hi = ((addr_start & 0xff00) >> 8) as u8;
     let addr_end_lo = (addr_end & 0xff) as u8;
     let addr_end_hi = ((addr_end & 0xff00) >> 8) as u8;
-    return vec![
+    vec![
         Cmd::WriteFlash as u8,
         addr_start_lo,
         addr_start_hi,
         addr_end_lo,
         addr_end_hi,
-    ];
+    ]
 }
 
 fn cmd_write_raw(addr_start: u16, addr_end: u16) -> Vec<u8> {
@@ -265,21 +282,21 @@ fn cmd_write_raw(addr_start: u16, addr_end: u16) -> Vec<u8> {
     let addr_start_hi = ((addr_start & 0xff00) >> 8) as u8;
     let addr_end_lo = (addr_end & 0xff) as u8;
     let addr_end_hi = ((addr_end & 0xff00) >> 8) as u8;
-    return vec![
+    vec![
         Cmd::WriteRaw as u8,
         addr_start_lo,
         addr_start_hi,
         addr_end_lo,
         addr_end_hi,
-    ];
+    ]
 }
 
 fn cmd_ping() -> Vec<u8> {
-    return vec![Cmd::Ping as u8, 0x00, 0x00, 0x00, 0x00];
+    vec![Cmd::Ping as u8, 0x00, 0x00, 0x00, 0x00]
 }
 
 fn cmd_mode_gba() -> Vec<u8> {
-    return vec![Cmd::ModeGBA as u8, 0x00, 0x00, 0x00, 0x00];
+    vec![Cmd::ModeGBA as u8, 0x00, 0x00, 0x00, 0x00]
 }
 
 // Read from [addr_start, addr_end)
@@ -296,7 +313,7 @@ fn cmd_gba_read(addr_start: u32, addr_end: u32) -> Vec<u8> {
     let addr_end_lo = (addr_end & 0x0000ff) as u8;
     let addr_end_mi = ((addr_end & 0x00ff00) >> 8) as u8;
     let addr_end_hi = ((addr_end & 0xff0000) >> 16) as u8;
-    return vec![
+    vec![
         Cmd::ReadGBAROM as u8,
         addr_start_lo,
         addr_start_mi,
@@ -304,10 +321,10 @@ fn cmd_gba_read(addr_start: u32, addr_end: u32) -> Vec<u8> {
         addr_end_lo,
         addr_end_mi,
         addr_end_hi,
-    ];
+    ]
 }
 
-fn run_subcommand(matches: ArgMatches) -> Result<(), io::Error> {
+fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
     let serial = matches.value_of("serial").unwrap();
     let baud = matches.value_of("baud").unwrap().parse::<usize>().unwrap();
     let board = match matches.value_of("board").unwrap() {
@@ -353,12 +370,12 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), io::Error> {
 
     if reset {
         dev_reset(board).unwrap_or_else(|e| {
-            println!("Error resetting development board: {}", e);
+            println!("Error resetting development board: {:?}", e);
             process::exit(1);
         });
         let mut buf = Vec::new();
         loop {
-            try!(port.read_until(b'\n', &mut buf));
+            port.read_until(b'\n', &mut buf)?;
             if buf == b"HELLO\n" {
                 break;
             }
@@ -401,10 +418,10 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), io::Error> {
                     }
                 }
                 if rom.len() == 0 {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!("File {} doesn't contain any ROM", path.display()),
-                    ));
+                    return Err(Error::Generic(format!(
+                        "File {} doesn't contain any ROM",
+                        path.display()
+                    )));
                 }
             } else {
                 OpenOptions::new()
@@ -426,7 +443,7 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), io::Error> {
         ("read_GBA_ROM", Some(sub_m)) => {
             println!("Reading GBA cartridge ROM into {}", path.display());
             let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-            let size = sub_m.value_of("size").unwrap().parse::<u32>().unwrap();
+            let size = sub_m.value_of("size").map(|s| s.parse::<u32>().unwrap());
             read_gba_rom(&mut port, &file, size)
         }
         ("read_GBA_test", Some(_)) => {
@@ -477,7 +494,7 @@ fn read<T: SerialPort>(
     mut port: &mut BufStream<T>,
     mut file: &File,
     memory: Memory,
-) -> Result<(), io::Error> {
+) -> Result<(), Error> {
     // Read Bank 00
     println!("Reading ROM bank 000");
     let addr_start = 0x0000 as u16;
@@ -495,10 +512,10 @@ fn read<T: SerialPort>(
     let header_info = match parse_header(&buf) {
         Ok(header_info) => header_info,
         Err(e) => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Error parsing cartridge header: {:?}", e),
-            ));
+            return Err(Error::Generic(format!(
+                "Error parsing cartridge header: {:?}",
+                e
+            )));
         }
     };
 
@@ -508,13 +525,10 @@ fn read<T: SerialPort>(
     println!();
 
     if header_info.checksum != header_checksum {
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!(
-                "Header checksum mismatch: {:02x} != {:02x}",
-                header_info.checksum, header_checksum
-            ),
-        ));
+        return Err(Error::Generic(format!(
+            "Header checksum mismatch: {:02x} != {:02x}",
+            header_info.checksum, header_checksum
+        )));
     }
 
     let mut mem = Vec::new();
@@ -577,7 +591,8 @@ fn read<T: SerialPort>(
         }
     }
     println!("Writing file...");
-    return file.write_all(&mem);
+    file.write_all(&mem)?;
+    Ok(())
 }
 
 fn switch_bank<T: SerialPort>(
@@ -585,15 +600,14 @@ fn switch_bank<T: SerialPort>(
     mem_controller: &MemController,
     memory: &Memory,
     bank: usize,
-) -> Result<(), io::Error> {
+) -> Result<(), Error> {
     let mut writes: Vec<(u16, u8)> = Vec::new();
     match *mem_controller {
         MemController::None => {
             if bank != 1 {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ROM Only cartridges can't select bank",
-                ));
+                return Err(Error::Generic(format!(
+                    "ROM Only cartridges can't select bank"
+                )));
             }
         }
         MemController::Mbc1 => {
@@ -621,34 +635,35 @@ fn switch_bank<T: SerialPort>(
             }
         }
         ref mc => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Error: Memory controller {:?} not implemented yet", mc),
-            ));
+            return Err(Error::Generic(format!(
+                "Error: Memory controller {:?} not implemented yet",
+                mc
+            )));
         }
     }
     for (addr, data) in writes {
         port.write_all(cmd_write(addr, data).as_slice())?;
     }
     port.flush()?;
-    return Ok(());
+    Ok(())
 }
 
 fn ram_enable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
     port.write_all(cmd_write(0x0000, 0x0A).as_slice())?;
-    return port.flush();
+    port.flush()
 }
 
 fn ram_disable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
     port.write_all(cmd_write(0x0000, 0x00).as_slice())?;
-    return port.flush();
+    port.flush()
 }
 
-fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
-    return erase_flash(&mut port);
+fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
+    erase_flash(&mut port)?;
+    Ok(())
 }
 
-fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
     switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
 
     let writes = vec![
@@ -678,23 +693,20 @@ fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Err
             break;
         }
         if buf[0] != 0x4c && buf[0] != 0x08 {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!(
-                    "Received incorrect erasing status 0x{:02x}, check the cartridge connection",
-                    buf[0]
-                ),
-            ));
+            return Err(Error::Generic(format!(
+                "Received incorrect erasing status 0x{:02x}, check the cartridge connection",
+                buf[0]
+            )));
         }
         //print!("{:02x} ", buf[0]);
         //io::stdout().flush()?;
     }
     println!("OK!");
 
-    return Ok(());
+    Ok(())
 }
 
-fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error> {
+fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
     switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
 
     let addr_start = 0x0000 as u16;
@@ -718,22 +730,28 @@ fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), io::Error
 
     print_hex(&buf[0x0000..0x0200], 0x4000);
     println!();
-    return Ok(());
+    Ok(())
 }
 
 fn read_gba_rom<T: SerialPort>(
     port: &mut BufStream<T>,
     mut file: &File,
-    size: u32,
-) -> Result<(), io::Error> {
+    size: Option<u32>,
+) -> Result<(), Error> {
     port.write_all(cmd_mode_gba().as_slice())?;
     port.flush()?;
 
-    //let mut mem = Vec::new();
-    //let mut addr_start = 0x0001_fe00 as u32;
+    let size = match size {
+        None => {
+            let s = guess_gba_rom_size(port)?;
+            println!("Guessed ROM size: {}MB ({}MBits)", s, s * 8);
+            s
+        }
+        Some(s) => s,
+    };
+
     let buf_len = 0x4000 as u32;
     let mut buf = vec![0; buf_len as usize];
-    //let end: u32 = 0x2_00_00_00;
     let end: u32 = size * 1024 * 1024;
     let mut pb = ProgressBar::new(end as u64);
     pb.set_units(Units::Bytes);
@@ -754,16 +772,16 @@ fn read_gba_rom<T: SerialPort>(
     //return file.write_all(&mem);
 }
 
-fn read_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
+fn read_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), Error> {
     port.write_all(cmd_mode_gba().as_slice())?;
     port.flush()?;
 
-    let buf_len = 0x80;
+    let buf_len = 0x100;
     let mut buf = vec![0; buf_len as usize];
     //for addr_start in range_step(0x1_00_00_00, 0x1_01_00_00, buf_len) {
     //for addr_start in range_step(0x0, 0x4000 * 1, buf_len) {
     let start = 0x0000;
-    for addr_start in range_step(start, start + buf_len * 2, buf_len) {
+    for addr_start in range_step(start, start + buf_len * 1, buf_len) {
         let addr_end = addr_start + buf_len;
         port.write_all(cmd_gba_read(addr_start, addr_end).as_slice())?;
         port.flush()?;
@@ -771,24 +789,34 @@ fn read_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error
         port.read_exact(&mut buf)?;
 
         println!("=== {:08x} - {:08x} ===", addr_start, addr_end);
-        print_hex(&buf[0x000000..0x000080], 0x0000);
+        print_hex(&buf[0x000000..0x000100], 0x0000);
         println!();
     }
-    //for addr_start in range_step(0x00000, 0x01000, buf_len) {
-    //    let addr_end = addr_start + buf_len;
-    //    port.write_all(cmd_gba_read(addr_start, addr_end).as_slice())?;
-    //    port.flush()?;
-
-    //    port.read_exact(&mut buf)?;
-
-    //    println!("=== {:08x} - {:08x} ===", addr_start, addr_end);
-    //    print_hex(&buf[0x000000..0x000100], 0x0000);
-    //    println!();
-    //}
-    return Ok(());
+    Ok(())
 }
 
-fn write_ram<T: SerialPort>(mut port: &mut BufStream<T>, sav: &[u8]) -> Result<(), io::Error> {
+fn guess_gba_rom_size<T: SerialPort>(port: &mut BufStream<T>) -> Result<u32, Error> {
+    port.write_all(cmd_mode_gba().as_slice())?;
+    port.flush()?;
+
+    let mut buf = vec![0; 0x08];
+    for size in vec![32, 16, 8, 4] {
+        for end in vec![size, size - size / 4] {
+            let addr_end = end * 1024 * 1024;
+            let addr_start = addr_end - 0x08;
+            port.write_all(cmd_gba_read(addr_start, addr_end).as_slice())?;
+            port.flush()?;
+            port.read_exact(&mut buf)?;
+
+            if buf != vec![0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20] {
+                return Ok(size);
+            }
+        }
+    }
+    Err(Error::Generic(format!("Unable to guess gba rom size")))
+}
+
+fn write_ram<T: SerialPort>(mut port: &mut BufStream<T>, sav: &[u8]) -> Result<(), Error> {
     // Read Bank 00
     println!("Reading ROM bank 000");
     let addr_start = 0x0000 as u16;
@@ -804,34 +832,28 @@ fn write_ram<T: SerialPort>(mut port: &mut BufStream<T>, sav: &[u8]) -> Result<(
     let header_info = match parse_header(&buf) {
         Ok(header_info) => header_info,
         Err(e) => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Error parsing cartridge header: {:?}", e),
-            ));
+            return Err(Error::Generic(format!(
+                "Error parsing cartridge header: {:?}",
+                e
+            )));
         }
     };
 
     let header_checksum = header_checksum(&buf);
 
     if header_info.checksum != header_checksum {
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!(
-                "Header checksum mismatch: {:02x} != {:02x}",
-                header_info.checksum, header_checksum
-            ),
-        ));
+        return Err(Error::Generic(format!(
+            "Header checksum mismatch: {:02x} != {:02x}",
+            header_info.checksum, header_checksum
+        )));
     }
 
     if sav.len() != header_info.ram_size {
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!(
-                "RAM size mismatch between header and file: {:02x} != {:02x}",
-                header_info.ram_size,
-                sav.len()
-            ),
-        ));
+        return Err(Error::Generic(format!(
+            "RAM size mismatch between header and file: {:02x} != {:02x}",
+            header_info.ram_size,
+            sav.len()
+        )));
     }
 
     ram_enable(&mut port)?;
@@ -873,9 +895,9 @@ fn write_ram<T: SerialPort>(mut port: &mut BufStream<T>, sav: &[u8]) -> Result<(
     port.read_exact(&mut reply)?;
     if reply[0] == CmdReply::Pong as u8 {
         println!("OK!");
-        return Ok(());
+        Ok(())
     } else {
-        return Err(Error::new(ErrorKind::Other, "Unexpected reply to ping"));
+        Err(Error::Generic(format!("Unexpected reply to ping")))
     }
 }
 
@@ -883,14 +905,11 @@ fn write_flash<T: SerialPort>(
     mut port: &mut BufStream<T>,
     //mut file: &File,
     rom: &[u8],
-) -> Result<(), io::Error> {
+) -> Result<(), Error> {
     let header_info = match parse_header(rom) {
         Ok(header_info) => header_info,
         Err(e) => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Error parsing rom header: {:?}", e),
-            ));
+            return Err(Error::Generic(format!("Error parsing rom header: {:?}", e)));
         }
     };
 
@@ -903,21 +922,15 @@ fn write_flash<T: SerialPort>(
         MemController::None => (),
         MemController::Mbc1 => {
             if header_info.rom_banks > 0x20 {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
-                        0x1f, header_info.rom_banks
-                    ),
-                ));
+                return Err(Error::Generic(format!(
+                    "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
+                    0x1f, header_info.rom_banks
+                )));
             }
         }
         MemController::Mbc5 => (),
         ref mc => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("{:?} is not MBC5-compatible", mc),
-            ));
+            return Err(Error::Generic(format!("{:?} is not MBC5-compatible", mc)));
         }
     }
 
@@ -953,8 +966,8 @@ fn write_flash<T: SerialPort>(
     port.read_exact(&mut reply)?;
     if reply[0] == CmdReply::Pong as u8 {
         println!("OK!");
-        return Ok(());
+        Ok(())
     } else {
-        return Err(Error::new(ErrorKind::Other, "Unexpected reply to ping"));
+        Err(Error::Generic(format!("Unexpected reply to ping")))
     }
 }
