@@ -431,7 +431,7 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
         process::exit(1);
     });
     port_raw
-        .set_timeout(Duration::from_secs(8))
+        .set_timeout(Duration::from_secs(16))
         .unwrap_or_else(|e| {
             println!("Error setting timeout for {}: {}", serial, e);
             process::exit(1);
@@ -858,24 +858,27 @@ fn read_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), Error> {
     wait_cmd_ack(port)?;
 
     let buf_len = 0x100;
-    let mut buf = vec![0; buf_len as usize];
+    let mut buf = vec![0; 0x800000];
     //for addr_start in range_step(0x1_00_00_00, 0x1_01_00_00, buf_len) {
     //for addr_start in range_step(0x0, 0x4000 * 1, buf_len) {
-    let start = 0x0000;
+    let start = 0x8000;
     for addr_start in range_step(start, start + buf_len * 1, buf_len) {
         let addr_end = addr_start + buf_len;
-        // bus_gba_read(port, addr_start, addr_end, &mut buf)?;
-        for addr in (addr_start..addr_end).step_by(2) {
-            run_cmd(port, cmd_gba_read_word(addr).as_slice())?;
-            let mut word_le: [u8; 2] = [0, 0];
-            port.read_exact(&mut word_le[..])?;
-            wait_cmd_ack(port)?;
-            buf[addr as usize] = word_le[0];
-            buf[addr as usize + 1] = word_le[1];
-        }
+        //// READ_GBA_ROM
+        bus_gba_read(port, addr_start, addr_end, &mut buf)?;
+        //// READ_GBA_WORD
+        // for addr in (addr_start..addr_end).step_by(2) {
+        //     run_cmd(port, cmd_gba_read_word(addr).as_slice())?;
+        //     let mut word_le: [u8; 2] = [0, 0];
+        //     port.read_exact(&mut word_le[..])?;
+        //     wait_cmd_ack(port)?;
+        //     buf[addr as usize] = word_le[0];
+        //     buf[addr as usize + 1] = word_le[1];
+        // }
 
         println!("=== {:08x} - {:08x} ===", addr_start, addr_end);
-        print_hex(&buf[0x000000..0x000100], 0x0000);
+        // print_hex(&buf[addr_start as usize..addr_end as usize], addr_start);
+        print_hex(&buf[..(addr_end - addr_start) as usize], addr_start);
         println!();
     }
     Ok(())
@@ -988,7 +991,7 @@ fn write_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), Error> {
     // port.write_all(cmd_gba_write(0x000002, 0x00ff).as_slice())?;
     // port.flush()?;
 
-    let sector = 0x0000;
+    let sector = 0x8000;
 
     //// Erase 0x8000 bytes sector
 
@@ -1026,7 +1029,7 @@ fn write_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), Error> {
     bus_gba_write(port, sector, 0xff)?;
 
     //// Write data
-    let sector = 0x10;
+    let sector = 0x8010;
 
     //let data = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
     //let data = [0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88];
@@ -1034,7 +1037,11 @@ fn write_gba_test<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), Error> {
     // let data = [0xee, 0xee, 0xcc, 0xcc, 0xaa, 0xaa, 0x99, 0x99];
     // let data = [0x00, 0x0f, 0xf0, 0xff];
     // let data = [0xff, 0xf0, 0x0f, 0x00];
-    let data = [0xde, 0xad, 0xbe, 0xef];
+    // let data = [0xde, 0xad, 0xbe, 0xef];
+    let mut data = vec![0; 256];
+    for i in 0..256 {
+        data[i] = i as u8;
+    }
 
     println!("DBG Write flash F3 data");
     bus_gba_flash_write(port, sector, &data, FlashType::F3)?;
@@ -1166,7 +1173,6 @@ fn write_gba_rom_test<T: SerialPort>(port: &mut BufStream<T>, rom: &[u8]) -> Res
         )));
     }
 
-    let mut buf = vec![0; sec_len];
     let mut pb = ProgressBar::new(rom.len() as u64);
     pb.set_units(Units::Bytes);
     pb.format("[=> ]");
@@ -1177,13 +1183,18 @@ fn write_gba_rom_test<T: SerialPort>(port: &mut BufStream<T>, rom: &[u8]) -> Res
         pb.add(sec_len as u64);
     }
     pb.finish_print("Erasing ROM finished");
+    // thread::sleep(Duration::from_millis(1000));
 
+    let mut buf = vec![0; sec_len];
     let mut pb = ProgressBar::new(rom.len() as u64);
     pb.set_units(Units::Bytes);
     pb.format("[=> ]");
     for i in 0..rom.len() / sec_len {
         let sector = (i as u32) * (sec_len as u32);
-        loop {
+        // println!("DBG Unlock");
+        // gba_flash_a_unlock_sector(port, sector)?; // DBG
+        for attempt in 0..4 {
+            // println!("DBG flash write");
             bus_gba_flash_write(
                 port,
                 sector,
@@ -1198,6 +1209,22 @@ fn write_gba_rom_test<T: SerialPort>(port: &mut BufStream<T>, rom: &[u8]) -> Res
                 "Sector {:08x} check didn't pass, flashing it again...",
                 sector
             );
+            println!("=== Expected ===");
+            print_hex(
+                &rom[sector as usize..sector as usize + 0x100],
+                sector as u32,
+            );
+            println!();
+            println!("=== Got ===");
+            print_hex(&buf[..0x100], sector as u32);
+            println!();
+            if attempt == 3 {
+                return Err(Error::Generic(format!(
+                    "Sector {:08x} check didn't pass after 4 write attempts",
+                    sector
+                )));
+            }
+            gba_flash_a_erase_sector(port, sector)?;
         }
         pb.add(sec_len as u64);
     }
