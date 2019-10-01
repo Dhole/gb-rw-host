@@ -1075,8 +1075,13 @@ fn gba_write_test<T: SerialPort>(gba: &mut Gba<T>) -> Result<(), Error> {
     // for i in 0..4 {
     //     bus_gba_flash_write(port, 0x20000 + i * 0x8000, &data, FlashType::F3)?;
     // }
-    gba.flash_unlock_sector(FlashType::F3, 0x20000)?;
-    gba.flash_erase_sector(FlashType::F3, 0x20000)?;
+
+    // gba.flash_unlock_sector(FlashType::F3, 0xfc0000)?;
+    // gba.flash_erase_sector(FlashType::F3, 0xfc0000)?;
+    // gba.flash_unlock_sector(FlashType::F3, 0xfc1000)?;
+    // gba.flash_erase_sector(FlashType::F3, 0xfc1000)?;
+
+
 
     //// Write data
     // let sector = 0x0000;
@@ -1198,7 +1203,8 @@ fn write_gba_rom_test<T: SerialPort>(gba: &mut Gba<T>, rom: &[u8]) -> Result<(),
                 gba.flash_erase_sector(FlashType::F3, sector)?;
             }
             let rom_sector = &rom[sector as usize..sector as usize + sec_len];
-            if rom_sector.iter().all(|b| *b == 0x00) || rom_sector.iter().all(|b| *b == 0xff) {
+            // if rom_sector.iter().all(|b| *b == 0x00) || rom_sector.iter().all(|b| *b == 0xff) {
+            if rom_sector.iter().all(|b| *b == 0xff) {
                 break;
             }
             // println!("DBG flash write");
