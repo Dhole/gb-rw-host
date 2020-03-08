@@ -166,10 +166,12 @@ fn main() {
             SubCommand::with_name("read")
                 .about("read Gameboy ROM test")
                 .arg(arg_file.clone()),
+            SubCommand::with_name("new_test").about("test urpc"),
         ]);
     let matches = app.clone().get_matches();
     if matches.subcommand_name() == None {
         app.print_help().unwrap();
+        println!();
         return;
     }
 
@@ -551,6 +553,7 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
         ("read", Some(_)) => "",
         ("read_GBA_test", Some(_)) => "",
         ("write_GBA_test", Some(_)) => "",
+        ("new_test", Some(_)) => "",
         (_, Some(sub_m)) => sub_m.value_of("file").unwrap(),
         _ => unreachable!(),
     });
@@ -633,6 +636,10 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                 .open(path)?
                 .read_to_end(&mut rom)?;
             write_gba_rom_test(&mut Gba::new(device)?, &rom)
+        }
+        ("new_test", Some(_)) => {
+            println!("OK");
+            Ok(())
         }
         // UPDATE
         // ("erase", Some(_)) => erase(&mut port),
@@ -1080,8 +1087,6 @@ fn gba_write_test<T: SerialPort>(gba: &mut Gba<T>) -> Result<(), Error> {
     // gba.flash_erase_sector(FlashType::F3, 0xfc0000)?;
     // gba.flash_unlock_sector(FlashType::F3, 0xfc1000)?;
     // gba.flash_erase_sector(FlashType::F3, 0xfc1000)?;
-
-
 
     //// Write data
     // let sector = 0x0000;
