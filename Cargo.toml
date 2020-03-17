@@ -12,3 +12,6 @@ enum_primitive = "*"
 time = "0.1"
 zip = "0.2.6"
 pbr = "1.0.1"
+
+[dependencies.urpc]
+path = "/home/dev/git/urpc"

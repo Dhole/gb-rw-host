@@ -2,6 +2,9 @@
 #![allow(unused_variables)]
 
 #[macro_use]
+extern crate urpc;
+
+#[macro_use]
 extern crate enum_primitive;
 extern crate bufstream;
 extern crate clap;
@@ -25,6 +28,8 @@ use std::process;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
+
+use urpc::{client, consts, OptBufNo, OptBufYes};
 
 use bufstream::BufStream;
 use clap::{App, Arg, ArgMatches, SubCommand};
@@ -68,6 +73,103 @@ enum Memory {
     Rom,
     Ram,
 }
+
+mod rpc {
+    rpc_client_io! {
+        Client;
+        client_requests;
+        (0, ping, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
+        (1, send_bytes, SendBytes((), OptBufYes, (), OptBufNo)),
+        (2, add, Add((u8, u8), OptBufNo, u8, OptBufNo)),
+        (3, recv_bytes, RecvBytes((), OptBufNo, (), OptBufYes)),
+        (4, send_recv, SendRecv((), OptBufYes, (), OptBufYes)),
+        (5, gb_read, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
+        (6, gb_mode, GBMode((), OptBufNo, bool, OptBufNo))
+    }
+}
+
+// struct RpcClientIO<S: io::Read + io::Write> {
+//     client: client::RpcClient,
+//     stream: S,
+//     pub stream_buf: Vec<u8>,
+//     pub body_buf: Option<Vec<u8>>,
+//     pub opt_buf: Option<Vec<u8>>,
+// }
+//
+// #[derive(Debug)]
+// enum RpcError {
+//     Io(io::Error),
+//     Urpc(urpc::client::Error),
+// }
+//
+// impl From<io::Error> for RpcError {
+//     fn from(err: io::Error) -> Self {
+//         Self::Io(err)
+//     }
+// }
+//
+// impl From<urpc::client::Error> for RpcError {
+//     fn from(err: urpc::client::Error) -> Self {
+//         Self::Urpc(err)
+//     }
+// }
+//
+// impl<S: Read + Write> RpcClientIO<S> {
+//     pub fn new(stream: S, buf_len: usize) -> Self {
+//         Self {
+//             client: client::RpcClient::new(),
+//             stream: stream,
+//             stream_buf: vec![0; buf_len],
+//             body_buf: Some(vec![0; buf_len]),
+//             opt_buf: Some(vec![0; buf_len]),
+//         }
+//     }
+//
+//     fn request(&mut self, chan_id: u8, write_len: usize) -> Result<(), RpcError> {
+//         self.stream.write_all(&self.stream_buf[..write_len])?;
+//         self.stream.flush()?;
+//
+//         let mut pos = 0;
+//         let mut read_len = consts::REP_HEADER_LEN;
+//         loop {
+//             let mut buf = &mut self.stream_buf[..read_len];
+//             self.stream.read_exact(&mut buf)?;
+//             read_len = match self.client.parse(&buf)? {
+//                 (n, None) => n,
+//                 (n, Some(_chan_id)) => {
+//                     if _chan_id == chan_id {
+//                         return Ok(());
+//                     }
+//                     n
+//                 }
+//             }
+//         }
+//     }
+// }
+//
+// struct RpcClient<S: io::Read + io::Write> {
+//     rpc: RpcClientIO<S>,
+// }
+//
+// impl<S: Read + Write> RpcClient<S> {
+//     pub fn new(stream: S, buf_len: usize) -> Self {
+//         Self {
+//             rpc: RpcClientIO::new(stream, buf_len),
+//         }
+//     }
+//     pub fn add(&mut self, arg: (u8, u8)) -> Result<u8, RpcError> {
+//         let mut req = rpc::Add::new(arg);
+//         let write_len = req.request(
+//             &mut self.rpc.client,
+//             self.rpc.body_buf.take().unwrap(),
+//             &mut self.rpc.stream_buf,
+//         )?;
+//         self.rpc.request(req.chan_id(), write_len)?;
+//         let (r, body_buf) = req.take_reply(&mut self.rpc.client).unwrap()?;
+//         self.rpc.body_buf = Some(body_buf);
+//         Ok(r)
+//     }
+// }
 
 fn main() {
     let arg_file = Arg::with_name("file")
@@ -166,7 +268,9 @@ fn main() {
             SubCommand::with_name("read")
                 .about("read Gameboy ROM test")
                 .arg(arg_file.clone()),
-            SubCommand::with_name("new_test").about("test urpc"),
+            SubCommand::with_name("new_test")
+                .about("test urpc")
+                .arg(arg_file.clone()),
         ]);
     let matches = app.clone().get_matches();
     if matches.subcommand_name() == None {
@@ -271,6 +375,21 @@ impl<T: SerialPort> Device<T> {
     fn mode_gba(&mut self) -> Result<(), Error> {
         self.send(&cmd_mode_gba())?;
         self.wait_cmd_ack()
+    }
+}
+
+impl<T: SerialPort> io::Read for Device<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.port.read(buf)
+    }
+}
+
+impl<T: SerialPort> io::Write for Device<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.port.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.port.flush()
     }
 }
 
@@ -553,10 +672,13 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
         ("read", Some(_)) => "",
         ("read_GBA_test", Some(_)) => "",
         ("write_GBA_test", Some(_)) => "",
-        ("new_test", Some(_)) => "",
+        // ("new_test", Some(_)) => "",
         (_, Some(sub_m)) => sub_m.value_of("file").unwrap(),
         _ => unreachable!(),
     });
+
+    // let mut rpc_client = client::RpcClient::new();
+    let mut rpc_client = rpc::Client::new(device, 0x4000);
 
     let result = match matches.subcommand() {
         ("read_ROM", Some(_)) => {
@@ -615,31 +737,50 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
             // write_ram(&mut port, &rom)
         }
         ("read_GBA_ROM", Some(sub_m)) => {
-            println!("Reading GBA cartridge ROM into {}", path.display());
-            let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-            let size = sub_m.value_of("size").map(|s| s.parse::<u32>().unwrap());
-            gba_read_rom(&mut Gba::new(device)?, &file, size)
+            unimplemented!()
+            // println!("Reading GBA cartridge ROM into {}", path.display());
+            // let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+            // let size = sub_m.value_of("size").map(|s| s.parse::<u32>().unwrap());
+            // gba_read_rom(&mut Gba::new(device)?, &file, size)
         }
         ("read_GBA_test", Some(_)) => {
-            println!("Reading GBA cartridge ROM into stdout");
-            gba_read_test(&mut Gba::new(device)?)
+            unimplemented!()
+            // println!("Reading GBA cartridge ROM into stdout");
+            // gba_read_test(&mut Gba::new(device)?)
         }
         ("write_GBA_test", Some(_)) => {
-            println!("Writing and reading GBA cartridge data, showing result in stdout");
-            gba_write_test(&mut Gba::new(device)?)
+            unimplemented!()
+            // println!("Writing and reading GBA cartridge data, showing result in stdout");
+            // gba_write_test(&mut Gba::new(device)?)
         }
         ("write_GBA_ROM_test", Some(_)) => {
-            println!("Writing {} into cartridge GBA ROM", path.display());
-            let mut rom = Vec::new();
-            OpenOptions::new()
-                .read(true)
-                .open(path)?
-                .read_to_end(&mut rom)?;
-            write_gba_rom_test(&mut Gba::new(device)?, &rom)
+            unimplemented!()
+            // println!("Writing {} into cartridge GBA ROM", path.display());
+            // let mut rom = Vec::new();
+            // OpenOptions::new()
+            //     .read(true)
+            //     .open(path)?
+            //     .read_to_end(&mut rom)?;
+            // write_gba_rom_test(&mut Gba::new(device)?, &rom)
         }
         ("new_test", Some(_)) => {
-            println!("OK");
-            Ok(())
+            // let r = rpc_client.ping([0, 1, 2, 3]).unwrap();
+            // let r = rpc_client.send_bytes((), &[0, 1, 2, 3]).unwrap();
+            // let r = rpc_client.add((3, 2)).unwrap();
+            // let r = rpc_client.recv_bytes(()).unwrap();
+            // let r = rpc_client.send_recv((), &[1, 2, 3, 4]).unwrap();
+            //
+            //println!("Reading cartridge ROM into {}", path.display());
+            let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+
+            rpc_client.gb_mode(()).unwrap();
+            println!("GB Mode Set");
+            thread::sleep(Duration::from_millis(500));
+            // let (_, buf) = rpc_client.gb_read((0x0000, 0x4000)).unwrap();
+            // println!("reply: {:?}", buf);
+            // print_hex(&buf, 0x0000);
+            // Ok(())
+            read(&mut rpc_client, &file, Memory::Rom)
         }
         // UPDATE
         // ("erase", Some(_)) => erase(&mut port),
@@ -657,10 +798,112 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
             Some("read_ROM") => fs::remove_file(path).unwrap_or(()),
             Some("read_RAM") => fs::remove_file(path).unwrap_or(()),
             Some("read_GBA_ROM") => fs::remove_file(path).unwrap_or(()),
+            Some("new_test") => fs::remove_file(path).unwrap_or(()),
             _ => (),
         }
     }
     result
+}
+
+fn read<S: io::Read + io::Write>(
+    mut rpc_client: &mut rpc::Client<S>,
+    mut file: &File,
+    memory: Memory,
+) -> Result<(), Error> {
+    // Read Bank 00
+    println!("Reading ROM bank 000");
+    let addr_start = 0x0000 as u16;
+    let size = 0x4000 as u16;
+    let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
+
+    println!();
+    //print_hex(&buf[0x0000..0x0200], 0x0000);
+    //println!();
+
+    let header_info = match parse_header(&buf) {
+        Ok(header_info) => header_info,
+        Err(e) => {
+            return Err(Error::Generic(format!(
+                "Error parsing cartridge header: {:?}",
+                e
+            )));
+        }
+    };
+
+    let header_checksum = header_checksum(&buf);
+
+    print_header(&header_info);
+    println!();
+
+    if header_info.checksum != header_checksum {
+        return Err(Error::Generic(format!(
+            "Header checksum mismatch: {:02x} != {:02x}",
+            header_info.checksum, header_checksum
+        )));
+    }
+
+    // let mut mem = Vec::new();
+    // match memory {
+    //     Memory::Rom => {
+    //         mem.extend_from_slice(&buf);
+    //         let addr_start = 0x4000 as u16;
+    //         let addr_end = 0x8000 as u16;
+    //         for bank in 1..(header_info.rom_banks + 1) {
+    //             // Pipeline requests and reads
+    //             if bank != header_info.rom_banks {
+    //                 println!("Switching to ROM bank {:03}", bank);
+    //                 switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
+    //                 println!("Reading ROM bank {:03}", bank);
+    //                 port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
+    //                 port.flush()?;
+    //             }
+    //             if bank != 1 {
+    //                 let mut buf = vec![0; (addr_end - addr_start) as usize];
+    //                 port.read_exact(&mut buf)?;
+    //                 mem.extend_from_slice(&buf);
+    //             }
+    //         }
+    //         println!();
+    //         let global_checksum = global_checksum(&mem);
+    //         if header_info.global_checksum != global_checksum {
+    //             println!(
+    //                 "Global checksum mismatch: {:02x} != {:02x}",
+    //                 header_info.global_checksum, global_checksum
+    //             );
+    //         } else {
+    //             println!("Global checksum verification successfull!");
+    //         }
+    //     }
+    //     Memory::Ram => {
+    //         ram_enable(&mut port)?;
+    //         let addr_start = 0xA000 as u16;
+    //         let addr_end = if header_info.ram_size < 0x2000 {
+    //             0xA000 + header_info.ram_size as u16
+    //         } else {
+    //             0xC000 as u16
+    //         };
+    //         for bank in 0..(header_info.ram_banks + 1) {
+    //             // Pipeline requests and reads
+    //             if bank != header_info.ram_banks {
+    //                 println!("Switching to RAM bank {:03}", bank);
+    //                 switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
+    //                 println!("Reading RAM bank {:03}", bank);
+    //                 port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
+    //                 port.flush()?;
+    //             }
+    //             if bank != 0 {
+    //                 let mut buf = vec![0; (addr_end - addr_start) as usize];
+    //                 port.read_exact(&mut buf)?;
+    //                 mem.extend_from_slice(&buf);
+    //             }
+    //         }
+    //         println!();
+    //         ram_disable(&mut port)?;
+    //     }
+    // }
+    // println!("Writing file...");
+    // file.write_all(&mem)?;
+    Ok(())
 }
 
 // UPDATE
