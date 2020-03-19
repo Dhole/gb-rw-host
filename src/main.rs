@@ -84,7 +84,8 @@ mod rpc {
         (3, recv_bytes, RecvBytes((), OptBufNo, (), OptBufYes)),
         (4, send_recv, SendRecv((), OptBufYes, (), OptBufYes)),
         (5, gb_read, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
-        (6, gb_mode, GBMode((), OptBufNo, bool, OptBufNo))
+        (6, gb_mode, GBMode((), OptBufNo, bool, OptBufNo)),
+        (7, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo))
     }
 }
 
@@ -842,67 +843,60 @@ fn read<S: io::Read + io::Write>(
         )));
     }
 
-    // let mut mem = Vec::new();
-    // match memory {
-    //     Memory::Rom => {
-    //         mem.extend_from_slice(&buf);
-    //         let addr_start = 0x4000 as u16;
-    //         let addr_end = 0x8000 as u16;
-    //         for bank in 1..(header_info.rom_banks + 1) {
-    //             // Pipeline requests and reads
-    //             if bank != header_info.rom_banks {
-    //                 println!("Switching to ROM bank {:03}", bank);
-    //                 switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
-    //                 println!("Reading ROM bank {:03}", bank);
-    //                 port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
-    //                 port.flush()?;
-    //             }
-    //             if bank != 1 {
-    //                 let mut buf = vec![0; (addr_end - addr_start) as usize];
-    //                 port.read_exact(&mut buf)?;
-    //                 mem.extend_from_slice(&buf);
-    //             }
-    //         }
-    //         println!();
-    //         let global_checksum = global_checksum(&mem);
-    //         if header_info.global_checksum != global_checksum {
-    //             println!(
-    //                 "Global checksum mismatch: {:02x} != {:02x}",
-    //                 header_info.global_checksum, global_checksum
-    //             );
-    //         } else {
-    //             println!("Global checksum verification successfull!");
-    //         }
-    //     }
-    //     Memory::Ram => {
-    //         ram_enable(&mut port)?;
-    //         let addr_start = 0xA000 as u16;
-    //         let addr_end = if header_info.ram_size < 0x2000 {
-    //             0xA000 + header_info.ram_size as u16
-    //         } else {
-    //             0xC000 as u16
-    //         };
-    //         for bank in 0..(header_info.ram_banks + 1) {
-    //             // Pipeline requests and reads
-    //             if bank != header_info.ram_banks {
-    //                 println!("Switching to RAM bank {:03}", bank);
-    //                 switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
-    //                 println!("Reading RAM bank {:03}", bank);
-    //                 port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
-    //                 port.flush()?;
-    //             }
-    //             if bank != 0 {
-    //                 let mut buf = vec![0; (addr_end - addr_start) as usize];
-    //                 port.read_exact(&mut buf)?;
-    //                 mem.extend_from_slice(&buf);
-    //             }
-    //         }
-    //         println!();
-    //         ram_disable(&mut port)?;
-    //     }
-    // }
-    // println!("Writing file...");
-    // file.write_all(&mem)?;
+    let mut mem = Vec::new();
+    match memory {
+        Memory::Rom => {
+            mem.extend_from_slice(&buf);
+            let addr_start = 0x4000 as u16;
+            let size = 0x4000 as u16;
+            for bank in 1..header_info.rom_banks {
+                println!("Switching to ROM bank {:03}", bank);
+                switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
+                println!("Reading ROM bank {:03}", bank);
+                let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
+                mem.extend_from_slice(&buf);
+            }
+            println!();
+            let global_checksum = global_checksum(&mem);
+            if header_info.global_checksum != global_checksum {
+                println!(
+                    "Global checksum mismatch: {:02x} != {:02x}",
+                    header_info.global_checksum, global_checksum
+                );
+            } else {
+                println!("Global checksum verification successfull!");
+            }
+        }
+        Memory::Ram => {
+            unimplemented!();
+            // ram_enable(&mut port)?;
+            // let addr_start = 0xA000 as u16;
+            // let addr_end = if header_info.ram_size < 0x2000 {
+            //     0xA000 + header_info.ram_size as u16
+            // } else {
+            //     0xC000 as u16
+            // };
+            // for bank in 0..(header_info.ram_banks + 1) {
+            //     // Pipeline requests and reads
+            //     if bank != header_info.ram_banks {
+            //         println!("Switching to RAM bank {:03}", bank);
+            //         switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
+            //         println!("Reading RAM bank {:03}", bank);
+            //         port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
+            //         port.flush()?;
+            //     }
+            //     if bank != 0 {
+            //         let mut buf = vec![0; (addr_end - addr_start) as usize];
+            //         port.read_exact(&mut buf)?;
+            //         mem.extend_from_slice(&buf);
+            //     }
+            // }
+            // println!();
+            // ram_disable(&mut port)?;
+        }
+    }
+    println!("Writing file...");
+    file.write_all(&mem)?;
     Ok(())
 }
 
@@ -1012,59 +1006,58 @@ fn read<S: io::Read + io::Write>(
 //     Ok(())
 // }
 
-// UPDATE
-// fn switch_bank<T: SerialPort>(
-//     port: &mut BufStream<T>,
-//     mem_controller: &MemController,
-//     memory: &Memory,
-//     bank: usize,
-// ) -> Result<(), Error> {
-//     let mut writes: Vec<(u16, u8)> = Vec::new();
-//     match *mem_controller {
-//         MemController::None => {
-//             if bank != 1 {
-//                 return Err(Error::Generic(format!(
-//                     "ROM Only cartridges can't select bank"
-//                 )));
-//             }
-//         }
-//         MemController::Mbc1 => {
-//             match *memory {
-//                 Memory::Rom => {
-//                     writes.push((0x6000, 0x00)); // Select ROM Banking Mode for upper two bits
-//                     writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
-//                     writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
-//                 }
-//                 Memory::Ram => {
-//                     writes.push((0x6000, 0x01)); // Select RAM Banking Mode
-//                     writes.push((0x4000, (bank as u8) & 0x03)); // Set bank bits 0..4
-//                 }
-//             }
-//         }
-//         MemController::Mbc5 => {
-//             match *memory {
-//                 Memory::Rom => {
-//                     writes.push((0x2000, ((bank as u16) & 0x00ff) as u8)); // Set bank bits 0..7
-//                     writes.push((0x3000, (((bank as u16) & 0x0100) >> 8) as u8)); // Set bank bit 8
-//                 }
-//                 Memory::Ram => {
-//                     writes.push((0x4000, (bank as u8) & 0x0f)); // Set bank bits 0..4
-//                 }
-//             }
-//         }
-//         ref mc => {
-//             return Err(Error::Generic(format!(
-//                 "Error: Memory controller {:?} not implemented yet",
-//                 mc
-//             )));
-//         }
-//     }
-//     for (addr, data) in writes {
-//         port.write_all(cmd_gb_write_byte(addr, data).as_slice())?;
-//     }
-//     port.flush()?;
-//     Ok(())
-// }
+fn switch_bank<S: io::Read + io::Write>(
+    mut rpc_client: &mut rpc::Client<S>,
+    mem_controller: &MemController,
+    memory: &Memory,
+    bank: usize,
+) -> Result<(), Error> {
+    let mut writes: Vec<(u16, u8)> = Vec::new();
+    match *mem_controller {
+        MemController::None => {
+            if bank != 1 {
+                return Err(Error::Generic(format!(
+                    "ROM Only cartridges can't select bank"
+                )));
+            }
+        }
+        MemController::Mbc1 => {
+            match *memory {
+                Memory::Rom => {
+                    writes.push((0x6000, 0x00)); // Select ROM Banking Mode for upper two bits
+                    writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
+                    writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
+                }
+                Memory::Ram => {
+                    writes.push((0x6000, 0x01)); // Select RAM Banking Mode
+                    writes.push((0x4000, (bank as u8) & 0x03)); // Set bank bits 0..4
+                }
+            }
+        }
+        MemController::Mbc5 => {
+            match *memory {
+                Memory::Rom => {
+                    writes.push((0x2000, ((bank as u16) & 0x00ff) as u8)); // Set bank bits 0..7
+                    writes.push((0x3000, (((bank as u16) & 0x0100) >> 8) as u8));
+                    // Set bank bit 8
+                }
+                Memory::Ram => {
+                    writes.push((0x4000, (bank as u8) & 0x0f)); // Set bank bits 0..4
+                }
+            }
+        }
+        ref mc => {
+            return Err(Error::Generic(format!(
+                "Error: Memory controller {:?} not implemented yet",
+                mc
+            )));
+        }
+    }
+    for (addr, data) in writes {
+        rpc_client.gb_write_word((addr, data)).unwrap();
+    }
+    Ok(())
+}
 
 // UPDATE
 // fn ram_enable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
