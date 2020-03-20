@@ -16,18 +16,15 @@ extern crate zip;
 
 extern crate gb_rw_host;
 
-use std::io;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 // use std::io::{BufReader, BufWriter};
+use std::cmp;
 use std::ffi::OsStr;
-use std::fs;
-use std::fs::File;
-use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::path::Path;
-use std::process;
-use std::process::Command;
+use std::process::{self, Command};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use urpc::{client, consts, OptBufNo, OptBufYes};
 
@@ -37,11 +34,9 @@ use num::iter::range_step;
 use pbr::{ProgressBar, Units};
 use serial::prelude::*;
 use std::io::prelude::*;
-use zip::read::ZipArchive;
-use zip::result::ZipError;
+use zip::{read::ZipArchive, result::ZipError};
 
-use gb_rw_host::header::*;
-use gb_rw_host::utils::*;
+use gb_rw_host::{header::*, utils::*};
 
 #[derive(Debug)]
 pub enum Error {
@@ -190,10 +185,13 @@ fn main() {
                 .short("b")
                 .long("baud")
                 .value_name("RATE")
-                //.default_value("115200")
-                .default_value("921600")
+                // Available speeds:
+                // https://github.com/torvalds/linux/blob/701a9c8092ddf299d7f90ab2d66b19b4526d1186/drivers/tty/tty_baudrate.c#L26
                 // .default_value("1152000")
-                //.default_value("2000000")
+                // .default_value("921600")
+                .default_value("1500000")
+                // .default_value("1228800")
+                // .default_value("3000000")
                 .takes_value(true)
                 .required(false)
                 .validator(|baud| match baud.parse::<usize>() {
@@ -232,46 +230,54 @@ fn main() {
                 .short("n"),
         )
         .subcommands(vec![
-            SubCommand::with_name("read_ROM")
-                .about("read Gameboy ROM")
-                .arg(arg_file.clone()),
-            SubCommand::with_name("read_RAM")
-                .about("read Gameboy RAM")
-                .arg(arg_file.clone()),
-            SubCommand::with_name("write_ROM")
-                .about("write Gameboy Flash ROM")
-                .arg(arg_file.clone()),
-            SubCommand::with_name("write_RAM")
-                .about("write Gameboy RAM")
-                .arg(arg_file.clone()),
-            SubCommand::with_name("read_GBA_ROM")
-                .about("read Gameboy Advance ROM")
-                .arg(arg_file.clone())
-                .arg(
-                    Arg::with_name("size")
-                        .help("ROM size in MB")
-                        .short("s")
-                        .long("size")
-                        .value_name("SIZE")
-                        .takes_value(true)
-                        .required(false)
-                        .validator(|size| match size.parse::<u32>() {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(format!("{}", e)),
-                        }),
-                ),
-            SubCommand::with_name("read_GBA_test").about("read Gameboy Advance ROM test"),
-            SubCommand::with_name("write_GBA_test").about("write Gameboy Advance ROM test"),
-            SubCommand::with_name("write_GBA_ROM_test")
-                .about("write Gameboy Advance ROM test")
-                .arg(arg_file.clone()),
-            SubCommand::with_name("erase").about("erase Gameboy Flash ROM"),
-            SubCommand::with_name("read")
-                .about("read Gameboy ROM test")
-                .arg(arg_file.clone()),
-            SubCommand::with_name("new_test")
-                .about("test urpc")
-                .arg(arg_file.clone()),
+            SubCommand::with_name("gb")
+                .about("Gameboy functions")
+                .subcommands(vec![
+                    SubCommand::with_name("read-rom")
+                        .about("read Gameboy ROM")
+                        .arg(arg_file.clone()),
+                    SubCommand::with_name("read-ram")
+                        .about("read Gameboy RAM")
+                        .arg(arg_file.clone()),
+                    SubCommand::with_name("write-rom")
+                        .about("write Gameboy Flash ROM")
+                        .arg(arg_file.clone()),
+                    SubCommand::with_name("write-ram")
+                        .about("write Gameboy RAM")
+                        .arg(arg_file.clone()),
+                    SubCommand::with_name("erase").about("erase Gameboy Flash ROM"),
+                    SubCommand::with_name("read")
+                        .about("read Gameboy ROM test")
+                        .arg(arg_file.clone()),
+                    SubCommand::with_name("new_test")
+                        .about("test urpc")
+                        .arg(arg_file.clone()),
+                ]),
+            SubCommand::with_name("gba")
+                .about("Gameboy Advance functions")
+                .subcommands(vec![
+                    SubCommand::with_name("read-rom")
+                        .about("read Gameboy Advance ROM")
+                        .arg(arg_file.clone())
+                        .arg(
+                            Arg::with_name("size")
+                                .help("ROM size in MB")
+                                .short("s")
+                                .long("size")
+                                .value_name("SIZE")
+                                .takes_value(true)
+                                .required(false)
+                                .validator(|size| match size.parse::<u32>() {
+                                    Ok(_) => Ok(()),
+                                    Err(e) => Err(format!("{}", e)),
+                                }),
+                        ),
+                    SubCommand::with_name("read-test").about("read Gameboy Advance ROM test"),
+                    SubCommand::with_name("write-test").about("write Gameboy Advance ROM test"),
+                    SubCommand::with_name("write-rom-test")
+                        .about("write Gameboy Advance ROM test")
+                        .arg(arg_file.clone()),
+                ]),
         ]);
     let matches = app.clone().get_matches();
     if matches.subcommand_name() == None {
@@ -668,125 +674,133 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
         println!("Connected!");
     }
 
-    let path = Path::new(match matches.subcommand() {
-        ("erase", Some(_)) => "",
-        ("read", Some(_)) => "",
-        ("read_GBA_test", Some(_)) => "",
-        ("write_GBA_test", Some(_)) => "",
-        // ("new_test", Some(_)) => "",
-        (_, Some(sub_m)) => sub_m.value_of("file").unwrap(),
+    let (mode, cmd, path) = match matches.subcommand() {
+        (mode, Some(app)) => match app.subcommand() {
+            (cmd, Some(sub)) => (mode, cmd, sub.value_of("file")),
+            _ => unreachable!(),
+        },
         _ => unreachable!(),
-    });
+    };
+    let file_write = match (mode, cmd, path) {
+        ("gb", "read-rom", path) => path,
+        ("gb", "read-ram", path) => path,
+        ("gba", "read-rom", path) => path,
+        ("gba", "read-ram", path) => path,
+        _ => None,
+    };
+    let file_write = match file_write {
+        Some(path) => Some((
+            path,
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?,
+        )),
+        None => None,
+    };
 
     // let mut rpc_client = client::RpcClient::new();
-    let mut rpc_client = rpc::Client::new(device, 0x4000);
+    let mut rpc_client = rpc::Client::new(device, 0x4100);
 
     let result = match matches.subcommand() {
-        ("read_ROM", Some(_)) => {
-            unimplemented!()
-            // UPDATE
-            // println!("Reading cartridge ROM into {}", path.display());
-            // let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-            // read(&mut port, &file, Memory::Rom)
+        ("gb", Some(app)) => {
+            match (app.subcommand(), &file_write) {
+                (("read-rom", _), Some((path, file))) => {
+                    println!("Reading cartridge ROM into {}", path);
+                    rpc_client.gb_mode(()).unwrap();
+                    println!("GB Mode Set");
+                    gb_read(&mut rpc_client, &file, Memory::Rom)
+                }
+                (("read-ram", _), Some((path, file))) => {
+                    println!("Reading cartridge ROM into {}", path);
+                    rpc_client.gb_mode(()).unwrap();
+                    println!("GB Mode Set");
+                    gb_read(&mut rpc_client, &file, Memory::Ram)
+                }
+                (("write-rom", _), _) => {
+                    unimplemented!()
+                    // UPDATE
+                    // println!("Writing {} into cartridge ROM", path.display());
+                    // let mut rom = Vec::new();
+                    // if path.extension() == Some(OsStr::new("zip")) {
+                    //     let mut zip = ZipArchive::new(File::open(path)?)?;
+                    //     for i in 0..zip.len() {
+                    //         let mut zip_file = zip.by_index(i).unwrap();
+                    //         let filename = zip_file.name().to_string();
+                    //         let extension = Path::new(&filename).extension();
+                    //         if extension == Some(OsStr::new("gb")) || extension == Some(OsStr::new("gbc")) {
+                    //             zip_file.read_to_end(&mut rom)?;;
+                    //             break;
+                    //         }
+                    //     }
+                    //     if rom.len() == 0 {
+                    //         return Err(Error::Generic(format!(
+                    //             "File {} doesn't contain any ROM",
+                    //             path.display()
+                    //         )));
+                    //     }
+                    // } else {
+                    //     OpenOptions::new()
+                    //         .read(true)
+                    //         .open(path)?
+                    //         .read_to_end(&mut rom)?;
+                    // }
+                    // write_flash(&mut port, &rom)
+                }
+                (("write-ram", _), _) => {
+                    unimplemented!()
+                    // UPDATE
+                    // println!("Writing {} into cartridge RAM", path.display());
+                    // let mut rom = Vec::new();
+                    // OpenOptions::new()
+                    //     .read(true)
+                    //     .open(path)?
+                    //     .read_to_end(&mut rom)?;
+                    // write_ram(&mut port, &rom)
+                }
+                ((cmd, _), _) => {
+                    panic!("Unexpected subcommand: {}", cmd);
+                }
+                // UPDATE
+                // ("erase", Some(_)) => erase(&mut port),
+                // UPDATE
+                // ("read", Some(_)) => read_test(&mut port),
+            }
         }
-        ("read_RAM", Some(_)) => {
-            unimplemented!()
-            // UPDATE
-            // println!("Reading cartridge RAM into {}", path.display());
-            // let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-            // read(&mut port, &file, Memory::Ram)
+        ("gba", Some(app)) => {
+            match app.subcommand() {
+                ("read-rom", Some(sub_m)) => {
+                    unimplemented!()
+                    // println!("Reading GBA cartridge ROM into {}", path.display());
+                    // let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+                    // let size = sub_m.value_of("size").map(|s| s.parse::<u32>().unwrap());
+                    // gba_read_rom(&mut Gba::new(device)?, &file, size)
+                }
+                ("read-test", Some(_)) => {
+                    unimplemented!()
+                    // println!("Reading GBA cartridge ROM into stdout");
+                    // gba_read_test(&mut Gba::new(device)?)
+                }
+                ("write-test", Some(_)) => {
+                    unimplemented!()
+                    // println!("Writing and reading GBA cartridge data, showing result in stdout");
+                    // gba_write_test(&mut Gba::new(device)?)
+                }
+                ("write-ROM-test", Some(_)) => {
+                    unimplemented!()
+                    // println!("Writing {} into cartridge GBA ROM", path.display());
+                    // let mut rom = Vec::new();
+                    // OpenOptions::new()
+                    //     .read(true)
+                    //     .open(path)?
+                    //     .read_to_end(&mut rom)?;
+                    // write_gba_rom_test(&mut Gba::new(device)?, &rom)
+                }
+                (cmd, _) => {
+                    panic!("Unexpected subcommand: {}", cmd);
+                }
+            }
         }
-        ("write_ROM", Some(_)) => {
-            unimplemented!()
-            // UPDATE
-            // println!("Writing {} into cartridge ROM", path.display());
-            // let mut rom = Vec::new();
-            // if path.extension() == Some(OsStr::new("zip")) {
-            //     let mut zip = ZipArchive::new(File::open(path)?)?;
-            //     for i in 0..zip.len() {
-            //         let mut zip_file = zip.by_index(i).unwrap();
-            //         let filename = zip_file.name().to_string();
-            //         let extension = Path::new(&filename).extension();
-            //         if extension == Some(OsStr::new("gb")) || extension == Some(OsStr::new("gbc")) {
-            //             zip_file.read_to_end(&mut rom)?;;
-            //             break;
-            //         }
-            //     }
-            //     if rom.len() == 0 {
-            //         return Err(Error::Generic(format!(
-            //             "File {} doesn't contain any ROM",
-            //             path.display()
-            //         )));
-            //     }
-            // } else {
-            //     OpenOptions::new()
-            //         .read(true)
-            //         .open(path)?
-            //         .read_to_end(&mut rom)?;
-            // }
-            // write_flash(&mut port, &rom)
-        }
-        ("write_RAM", Some(_)) => {
-            unimplemented!()
-            // UPDATE
-            // println!("Writing {} into cartridge RAM", path.display());
-            // let mut rom = Vec::new();
-            // OpenOptions::new()
-            //     .read(true)
-            //     .open(path)?
-            //     .read_to_end(&mut rom)?;
-            // write_ram(&mut port, &rom)
-        }
-        ("read_GBA_ROM", Some(sub_m)) => {
-            unimplemented!()
-            // println!("Reading GBA cartridge ROM into {}", path.display());
-            // let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-            // let size = sub_m.value_of("size").map(|s| s.parse::<u32>().unwrap());
-            // gba_read_rom(&mut Gba::new(device)?, &file, size)
-        }
-        ("read_GBA_test", Some(_)) => {
-            unimplemented!()
-            // println!("Reading GBA cartridge ROM into stdout");
-            // gba_read_test(&mut Gba::new(device)?)
-        }
-        ("write_GBA_test", Some(_)) => {
-            unimplemented!()
-            // println!("Writing and reading GBA cartridge data, showing result in stdout");
-            // gba_write_test(&mut Gba::new(device)?)
-        }
-        ("write_GBA_ROM_test", Some(_)) => {
-            unimplemented!()
-            // println!("Writing {} into cartridge GBA ROM", path.display());
-            // let mut rom = Vec::new();
-            // OpenOptions::new()
-            //     .read(true)
-            //     .open(path)?
-            //     .read_to_end(&mut rom)?;
-            // write_gba_rom_test(&mut Gba::new(device)?, &rom)
-        }
-        ("new_test", Some(_)) => {
-            // let r = rpc_client.ping([0, 1, 2, 3]).unwrap();
-            // let r = rpc_client.send_bytes((), &[0, 1, 2, 3]).unwrap();
-            // let r = rpc_client.add((3, 2)).unwrap();
-            // let r = rpc_client.recv_bytes(()).unwrap();
-            // let r = rpc_client.send_recv((), &[1, 2, 3, 4]).unwrap();
-            //
-            //println!("Reading cartridge ROM into {}", path.display());
-            let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-
-            rpc_client.gb_mode(()).unwrap();
-            println!("GB Mode Set");
-            thread::sleep(Duration::from_millis(500));
-            // let (_, buf) = rpc_client.gb_read((0x0000, 0x4000)).unwrap();
-            // println!("reply: {:?}", buf);
-            // print_hex(&buf, 0x0000);
-            // Ok(())
-            read(&mut rpc_client, &file, Memory::Rom)
-        }
-        // UPDATE
-        // ("erase", Some(_)) => erase(&mut port),
-        // UPDATE
-        // ("read", Some(_)) => read_test(&mut port),
         (cmd, _) => {
             panic!("Unexpected subcommand: {}", cmd);
         }
@@ -795,18 +809,14 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
 
     // Error cleanup
     if result.is_err() {
-        match matches.subcommand_name() {
-            Some("read_ROM") => fs::remove_file(path).unwrap_or(()),
-            Some("read_RAM") => fs::remove_file(path).unwrap_or(()),
-            Some("read_GBA_ROM") => fs::remove_file(path).unwrap_or(()),
-            Some("new_test") => fs::remove_file(path).unwrap_or(()),
-            _ => (),
+        if let Some((path, _)) = file_write {
+            fs::remove_file(path).unwrap_or(())
         }
     }
     result
 }
 
-fn read<S: io::Read + io::Write>(
+fn gb_read<S: io::Read + io::Write>(
     mut rpc_client: &mut rpc::Client<S>,
     mut file: &File,
     memory: Memory,
@@ -815,11 +825,10 @@ fn read<S: io::Read + io::Write>(
     println!("Reading ROM bank 000");
     let addr_start = 0x0000 as u16;
     let size = 0x4000 as u16;
+    let start = Instant::now();
     let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
 
     println!();
-    //print_hex(&buf[0x0000..0x0200], 0x0000);
-    //println!();
 
     let header_info = match parse_header(&buf) {
         Ok(header_info) => header_info,
@@ -844,55 +853,65 @@ fn read<S: io::Read + io::Write>(
     }
 
     let mut mem = Vec::new();
-    match memory {
+    let (elapsed, mut pb, n) = match memory {
         Memory::Rom => {
+            let mut pb = ProgressBar::new(0x4000 * header_info.rom_banks as u64);
+            pb.set_units(Units::Bytes);
+            pb.format("[=> ]");
             mem.extend_from_slice(&buf);
             let addr_start = 0x4000 as u16;
             let size = 0x4000 as u16;
             for bank in 1..header_info.rom_banks {
-                println!("Switching to ROM bank {:03}", bank);
+                // println!("Switching to ROM bank {:03}", bank);
                 switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
-                println!("Reading ROM bank {:03}", bank);
+                // println!("Reading ROM bank {:03}", bank);
                 let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
                 mem.extend_from_slice(&buf);
+                pb.add(0x4000 as u64);
             }
-            println!();
-            let global_checksum = global_checksum(&mem);
-            if header_info.global_checksum != global_checksum {
-                println!(
-                    "Global checksum mismatch: {:02x} != {:02x}",
-                    header_info.global_checksum, global_checksum
-                );
-            } else {
-                println!("Global checksum verification successfull!");
-            }
+            (start.elapsed(), pb, size as usize * header_info.rom_banks)
         }
         Memory::Ram => {
-            unimplemented!();
-            // ram_enable(&mut port)?;
-            // let addr_start = 0xA000 as u16;
-            // let addr_end = if header_info.ram_size < 0x2000 {
-            //     0xA000 + header_info.ram_size as u16
-            // } else {
-            //     0xC000 as u16
-            // };
-            // for bank in 0..(header_info.ram_banks + 1) {
-            //     // Pipeline requests and reads
-            //     if bank != header_info.ram_banks {
-            //         println!("Switching to RAM bank {:03}", bank);
-            //         switch_bank(&mut port, &header_info.mem_controller, &memory, bank)?;
-            //         println!("Reading RAM bank {:03}", bank);
-            //         port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
-            //         port.flush()?;
-            //     }
-            //     if bank != 0 {
-            //         let mut buf = vec![0; (addr_end - addr_start) as usize];
-            //         port.read_exact(&mut buf)?;
-            //         mem.extend_from_slice(&buf);
-            //     }
-            // }
-            // println!();
-            // ram_disable(&mut port)?;
+            let mut pb = ProgressBar::new(header_info.ram_size as u64);
+            pb.set_units(Units::Bytes);
+            pb.format("[=> ]");
+            ram_enable(&mut rpc_client)?;
+            let addr_start = 0xA000 as u16;
+            let size = cmp::min(header_info.ram_size, 0x2000) as u16;
+            for bank in 0..header_info.ram_banks {
+                // println!("Switching to RAM bank {:03}", bank);
+                switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
+                // println!("Reading RAM bank {:03}", bank);
+                let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
+                mem.extend_from_slice(&buf);
+                pb.add(0x4000 as u64);
+            }
+            let elapsed = start.elapsed();
+            ram_disable(&mut rpc_client)?;
+            (elapsed, pb, size as usize * header_info.ram_banks)
+        }
+    };
+
+    let elapsed_millis = cmp::max(elapsed.as_secs() * 1000 + elapsed.subsec_millis() as u64, 1);
+    pb.finish_print(&format!(
+        "Reading {} finished in {}m {}s at {:.02} KB/s",
+        match memory {
+            Memory::Rom => "ROM",
+            Memory::Ram => "RAM",
+        },
+        elapsed_millis / 1000 / 60,
+        (elapsed_millis / 1000) % 60,
+        n as f64 / 1024.0 / (elapsed_millis as f64 / 1000.0)
+    ));
+    if let Memory::Rom = memory {
+        let global_checksum = global_checksum(&mem);
+        if header_info.global_checksum != global_checksum {
+            println!(
+                "Global checksum mismatch: {:02x} != {:02x}",
+                header_info.global_checksum, global_checksum
+            );
+        } else {
+            println!("Global checksum verification successfull!");
         }
     }
     println!("Writing file...");
@@ -1059,17 +1078,19 @@ fn switch_bank<S: io::Read + io::Write>(
     Ok(())
 }
 
-// UPDATE
-// fn ram_enable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
-//     port.write_all(cmd_gb_write_byte(0x0000, 0x0A).as_slice())?;
-//     port.flush()
-// }
+fn ram_enable<S: io::Read + io::Write>(
+    mut rpc_client: &mut rpc::Client<S>,
+) -> Result<(), io::Error> {
+    rpc_client.gb_write_word((0x0000, 0x0A)).unwrap();
+    Ok(())
+}
 
-// UPDATE
-// fn ram_disable<T: SerialPort>(port: &mut BufStream<T>) -> Result<(), io::Error> {
-//     port.write_all(cmd_gb_write_byte(0x0000, 0x00).as_slice())?;
-//     port.flush()
-// }
+fn ram_disable<S: io::Read + io::Write>(
+    mut rpc_client: &mut rpc::Client<S>,
+) -> Result<(), io::Error> {
+    rpc_client.gb_write_word((0x0000, 0x00)).unwrap();
+    Ok(())
+}
 
 // UPDATE
 // fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
