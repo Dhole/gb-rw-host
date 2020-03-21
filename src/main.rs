@@ -754,26 +754,8 @@ fn gb_read<S: io::Read + io::Write>(
     mut file: &fs::File,
     memory: Memory,
 ) -> Result<(), Error> {
-    // Read Bank 00
-    println!("Reading ROM bank 000");
-    let addr_start = 0x0000 as u16;
-    let size = 0x4000 as u16;
     let start = Instant::now();
-    let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
-
-    println!();
-
-    let header_info = match parse_header(&buf) {
-        Ok(header_info) => header_info,
-        Err(e) => {
-            return Err(Error::Generic(format!(
-                "Error parsing cartridge header: {:?}",
-                e
-            )));
-        }
-    };
-
-    let header_checksum = header_checksum(&buf);
+    let (header_info, buf, header_checksum) = gb_read_header(&mut rpc_client)?;
 
     print_header(&header_info);
     println!();
@@ -788,36 +770,39 @@ fn gb_read<S: io::Read + io::Write>(
     let mut mem = Vec::new();
     let (elapsed, mut pb, n) = match memory {
         Memory::Rom => {
-            let mut pb = ProgressBar::new(0x4000 * header_info.rom_banks as u64);
+            let mut pb = ProgressBar::new(ROM_BANK_SIZE as u64 * header_info.rom_banks as u64);
             pb.set_units(Units::Bytes);
             pb.format("[=> ]");
             mem.extend_from_slice(&buf);
-            let addr_start = 0x4000 as u16;
-            let size = 0x4000 as u16;
+            let addr = 0x4000 as u16;
             for bank in 1..header_info.rom_banks {
                 // println!("Switching to ROM bank {:03}", bank);
                 switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
                 // println!("Reading ROM bank {:03}", bank);
-                let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
+                let (_, buf) = rpc_client.gb_read((addr, ROM_BANK_SIZE)).unwrap();
                 mem.extend_from_slice(&buf);
-                pb.add(0x4000 as u64);
+                pb.add(ROM_BANK_SIZE as u64);
             }
-            (start.elapsed(), pb, size as usize * header_info.rom_banks)
+            (
+                start.elapsed(),
+                pb,
+                ROM_BANK_SIZE as usize * header_info.rom_banks,
+            )
         }
         Memory::Ram => {
             let mut pb = ProgressBar::new(header_info.ram_size as u64);
             pb.set_units(Units::Bytes);
             pb.format("[=> ]");
             ram_enable(&mut rpc_client)?;
-            let addr_start = 0xA000 as u16;
-            let size = cmp::min(header_info.ram_size, 0x2000) as u16;
+            let addr = 0xA000 as u16;
+            let size = cmp::min(header_info.ram_size as u16, RAM_BANK_SIZE);
             for bank in 0..header_info.ram_banks {
                 // println!("Switching to RAM bank {:03}", bank);
                 switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
                 // println!("Reading RAM bank {:03}", bank);
-                let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
+                let (_, buf) = rpc_client.gb_read((addr, size)).unwrap();
                 mem.extend_from_slice(&buf);
-                pb.add(0x4000 as u64);
+                pb.add(RAM_BANK_SIZE as u64);
             }
             let elapsed = start.elapsed();
             ram_disable(&mut rpc_client)?;
@@ -1367,20 +1352,16 @@ fn guess_gba_rom_size<T: SerialPort>(gba: &mut Gba<T>) -> Result<u32, Error> {
     Err(Error::Generic(format!("Unable to guess gba rom size")))
 }
 
-fn gb_write_ram<S: io::Read + io::Write>(
+fn gb_read_header<S: io::Read + io::Write>(
     mut rpc_client: &mut rpc::Client<S>,
-    sav: &[u8],
-) -> Result<(), Error> {
-    // Read Bank 00
+) -> Result<(HeaderInfo, Vec<u8>, u8), Error> {
     println!("Reading ROM bank 000");
-    let addr_start = 0x0000 as u16;
-    let size = 0x4000 as u16;
-    let start = Instant::now();
-    let (_, buf) = rpc_client.gb_read((addr_start, size)).unwrap();
+    let addr = 0x0000 as u16;
+    let (_, buf) = rpc_client.gb_read((addr, ROM_BANK_SIZE)).unwrap();
 
     println!();
 
-    let header_info = match parse_header(&buf) {
+    let info = match parse_header(&buf) {
         Ok(header_info) => header_info,
         Err(e) => {
             return Err(Error::Generic(format!(
@@ -1389,8 +1370,16 @@ fn gb_write_ram<S: io::Read + io::Write>(
             )));
         }
     };
+    let checksum = header_checksum(&buf);
+    Ok((info, buf, checksum))
+}
 
-    let header_checksum = header_checksum(&buf);
+fn gb_write_ram<S: io::Read + io::Write>(
+    mut rpc_client: &mut rpc::Client<S>,
+    sav: &[u8],
+) -> Result<(), Error> {
+    let start = Instant::now();
+    let (header_info, _, header_checksum) = gb_read_header(&mut rpc_client)?;
 
     print_header(&header_info);
     println!();
@@ -1411,34 +1400,12 @@ fn gb_write_ram<S: io::Read + io::Write>(
     }
 
     ram_enable(&mut rpc_client)?;
-    let addr_start = 0xA000 as u16;
-    let size = cmp::min(header_info.ram_size, 0x2000) as u16;
-    // let bank_len = (addr_end - addr_start) as usize;
-    // println!("addr_end = {}", addr_end);
-    // let mut reply = vec![0; 1];
-    let mut pb = ProgressBar::new(0x2000 * header_info.ram_banks as u64);
+    let addr = 0xA000 as u16;
+    let size = cmp::min(header_info.ram_size as u16, RAM_BANK_SIZE);
+    let mut pb = ProgressBar::new(RAM_BANK_SIZE as u64 * header_info.ram_banks as u64);
     pb.set_units(Units::Bytes);
     pb.format("[=> ]");
     for bank in 0..header_info.ram_banks {
-        // if bank != 0 {
-        //     println!("Switching to ROM bank {:03}", bank);
-        //     switch_bank(&mut port, &header_info.mem_controller, &Memory::Ram, bank)?;
-        // }
-
-        // loop {
-        //     port.write_all(cmd_gb_write(addr_start, addr_end).as_slice())?;
-        //     port.flush()?;
-
-        //     port.read_exact(&mut reply)?;
-        //     if reply[0] == CmdReply::DMAReady as u8 {
-        //         break;
-        //     }
-        //     thread::sleep(Duration::from_millis(100));
-        // }
-        // println!("Writing RAM bank {:03}...", bank);
-        // port.write_all(&sav[bank * 0x2000..bank * 0x2000 + bank_len])?;
-        // port.flush()?;
-
         // println!("Switching to RAM bank {:03}", bank);
         switch_bank(
             &mut rpc_client,
@@ -1447,28 +1414,15 @@ fn gb_write_ram<S: io::Read + io::Write>(
             bank,
         )?;
         // println!("Reading RAM bank {:03}", bank);
+        let sav_pos = bank * RAM_BANK_SIZE as usize;
         rpc_client
-            .gb_write(
-                addr_start,
-                &sav[bank * 0x2000..bank * 0x2000 + size as usize],
-            )
+            .gb_write(addr, &sav[sav_pos..sav_pos + size as usize])
             .unwrap();
-        pb.add(0x4000 as u64);
+        pb.add(RAM_BANK_SIZE as u64);
     }
 
     ram_disable(&mut rpc_client)?;
     Ok(())
-
-    // println!("Waiting for confirmation...");
-    // port.write_all(cmd_ping().as_slice())?;
-    // port.flush()?;
-    // port.read_exact(&mut reply)?;
-    // if reply[0] == CmdReply::Pong as u8 {
-    //     println!("OK!");
-    //     Ok(())
-    // } else {
-    //     Err(Error::Generic(format!("Unexpected reply to ping")))
-    // }
 }
 
 // UPDATE

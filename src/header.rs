@@ -3,6 +3,10 @@ use std::num::Wrapping;
 
 use utils;
 
+pub const ROM_BANK_SIZE: u16 = 0x4000;
+pub const RAM_BANK_SIZE: u16 = 0x2000;
+pub const RAM_ADDR: u16 = 0xA000;
+
 #[derive(Debug, PartialEq)]
 pub enum CGBFlag {
     DMGCompat = 0x80,
@@ -241,12 +245,10 @@ pub fn parse_header(bank: &[u8]) -> Result<HeaderInfo, HeaderError> {
 
     let license = match bank[0x014B] {
         0x33 => License::NewLicense(bank[0x0144] as char, bank[0x0145] as char),
-        b => {
-            match OldLicense::from_u8(b) {
-                Some(ol) => License::OldLicense(ol),
-                None => License::OldLicense(OldLicense::Unknown),
-            }
-        }
+        b => match OldLicense::from_u8(b) {
+            Some(ol) => License::OldLicense(ol),
+            None => License::OldLicense(OldLicense::Unknown),
+        },
     };
 
     let checksum = bank[0x014D];
