@@ -109,7 +109,7 @@ pub enum RamSize {
 }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MemController {
     None,
     Mbc1,
@@ -129,8 +129,8 @@ pub struct HeaderInfo {
     pub license: License,
     pub cart_type: CartType,
     pub mem_controller: MemController,
-    pub rom_banks: usize,
-    pub ram_banks: usize,
+    pub rom_banks: u16,
+    pub ram_banks: u16,
     pub ram_size: usize,
     pub destination: Destination,
     pub checksum: u8,
@@ -176,7 +176,7 @@ fn cart_type_to_mem_controller(cart_type: &CartType) -> MemController {
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-fn rom_banks_to_usize(rom_banks: RomBanks, mem_controller: &MemController) -> usize {
+fn rom_banks_to_u16(rom_banks: RomBanks, mem_controller: &MemController) -> u16 {
     return match rom_banks {
         RomBanks::Banks002 => 2,
         RomBanks::Banks004 => 4,
@@ -228,7 +228,7 @@ pub fn parse_header(bank: &[u8]) -> Result<HeaderInfo, HeaderError> {
     let mem_controller = cart_type_to_mem_controller(&cart_type);
 
     let rom_banks = match RomBanks::from_u8(bank[0x0148]) {
-        Some(rom_banks) => rom_banks_to_usize(rom_banks, &mem_controller),
+        Some(rom_banks) => rom_banks_to_u16(rom_banks, &mem_controller),
         None => return Err(HeaderError::UnknownRomBanks),
     };
 
@@ -236,7 +236,7 @@ pub fn parse_header(bank: &[u8]) -> Result<HeaderInfo, HeaderError> {
         Some(ram_size) => ram_size_to_usize(ram_size),
         None => return Err(HeaderError::UnknownRamSize),
     };
-    let ram_banks = utils::div_round_up(ram_size, 0x2000);
+    let ram_banks = utils::div_round_up(ram_size, 0x2000) as u16;
 
     let destination = match Destination::from_u8(bank[0x014A]) {
         Some(d) => d,
@@ -295,7 +295,7 @@ pub fn print_header(header_info: &HeaderInfo) {
     println!("Memory controller: {:?}", header_info.mem_controller);
     println!("Rom banks: {}", header_info.rom_banks);
     println!("Ram banks: {}", header_info.ram_banks);
-    println!("Ram size:  {} KB", header_info.ram_size);
+    println!("Ram size:  {} KB", header_info.ram_size / 1000);
     println!("Destination: {:?}", header_info.destination);
     println!("Checksum:  {:02x}", header_info.checksum);
     println!("Global checksum: {:04x}", header_info.global_checksum);

@@ -10,6 +10,7 @@ extern crate bufstream;
 extern crate clap;
 extern crate num;
 extern crate pbr;
+extern crate serde;
 extern crate serial;
 extern crate time;
 extern crate zip;
@@ -26,7 +27,10 @@ use std::process::{self, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use urpc::{client, consts, OptBufNo, OptBufYes};
+use urpc::{
+    client::{self, RpcClientIOError},
+    consts, OptBufNo, OptBufYes,
+};
 
 use bufstream::BufStream;
 use clap::{App, Arg, ArgMatches, SubCommand};
@@ -42,18 +46,28 @@ use gb_rw_host::{header::*, utils::*};
 pub enum Error {
     Serial(io::Error),
     Zip(ZipError),
+    Urpc(client::Error),
     Generic(String),
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::Serial(err)
+        Self::Serial(err)
     }
 }
 
 impl From<ZipError> for Error {
     fn from(err: ZipError) -> Self {
-        Error::Zip(err)
+        Self::Zip(err)
+    }
+}
+
+impl From<RpcClientIOError> for Error {
+    fn from(err: RpcClientIOError) -> Self {
+        match err {
+            RpcClientIOError::Io(err) => Self::Serial(err),
+            RpcClientIOError::Urpc(err) => Self::Urpc(err),
+        }
     }
 }
 
@@ -70,6 +84,14 @@ enum Memory {
 }
 
 mod rpc {
+
+    use serde::Serialize;
+    #[derive(Debug, Serialize)]
+    pub enum ReqMode {
+        GB,
+        GBA,
+    }
+
     rpc_client_io! {
         Client;
         client_requests;
@@ -79,9 +101,11 @@ mod rpc {
         (3, recv_bytes, RecvBytes((), OptBufNo, (), OptBufYes)),
         (4, send_recv, SendRecv((), OptBufYes, (), OptBufYes)),
         (5, gb_read, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
-        (6, gb_mode, GBMode((), OptBufNo, bool, OptBufNo)),
+        (6, mode, Mode(ReqMode, OptBufNo, bool, OptBufNo)),
         (7, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
-        (8, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo))
+        (8, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
+        (9, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
+        (10, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo))
     }
 }
 
@@ -159,6 +183,12 @@ fn main() {
                         .arg(arg_file.clone()),
                     SubCommand::with_name("write-rom")
                         .about("write Gameboy Flash ROM")
+                        .arg(
+                            Arg::with_name("noerase")
+                                .help("Don't erase flash")
+                                .long("noerase")
+                                .short("n"),
+                        )
                         .arg(arg_file.clone()),
                     SubCommand::with_name("write-ram")
                         .about("write Gameboy RAM")
@@ -318,40 +348,6 @@ impl<T: SerialPort> io::Write for Device<T> {
     }
 }
 
-struct Gb<T: SerialPort> {
-    dev: Device<T>,
-}
-
-impl<T: SerialPort> Gb<T> {
-    fn new(dev: Device<T>) -> Self {
-        Self { dev }
-    }
-
-    fn read(&mut self, addr: u16, buf: &mut [u8]) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn write(&mut self, addr: u16, buf: &[u8]) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn switch_bank(&mut self, mem_controller: &MemController, bank: usize) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn ram_enable(&mut self) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn ram_disable(&mut self) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn erase_flash(&mut self) -> Result<(), Error> {
-        unimplemented!()
-    }
-}
-
 struct Gba<T: SerialPort> {
     dev: Device<T>,
 }
@@ -417,6 +413,361 @@ impl<T: SerialPort> Gba<T> {
         ))?;
         self.dev.send(data)?;
         self.dev.wait_cmd_ack()
+    }
+}
+
+struct Gb<S: io::Read + io::Write, I> {
+    rpc_cli: rpc::Client<S>,
+    info: I,
+    bank0: Vec<u8>,
+}
+
+fn new_progress_bar(n: u64) -> ProgressBar<io::Stdout> {
+    let mut pb = ProgressBar::new(n);
+    pb.set_units(Units::Bytes);
+    pb.format("[=> ]");
+    pb
+}
+
+fn progress_bar_finish<T: io::Write>(
+    pb: &mut ProgressBar<T>,
+    action: &str,
+    n: usize,
+    dur: Duration,
+) {
+    let dur_millis = cmp::max(dur.as_secs() * 1000 + dur.subsec_millis() as u64, 1);
+    pb.finish_print(&format!(
+        "{} finished in {}m {}s at {:.02} KB/s",
+        action,
+        dur_millis / 1000 / 60,
+        (dur_millis / 1000) % 60,
+        n as f64 / 1024.0 / (dur_millis as f64 / 1000.0)
+    ));
+}
+
+impl<S: io::Read + io::Write> Gb<S, ()> {
+    fn new(mut rpc_client: rpc::Client<S>) -> Result<Self, Error> {
+        rpc_client.mode(rpc::ReqMode::GB)?;
+        println!("GB Mode Set");
+
+        Ok(Self {
+            rpc_cli: rpc_client,
+            info: (),
+            bank0: Vec::new(),
+        })
+    }
+}
+
+impl<S: io::Read + io::Write, I> Gb<S, I> {
+    fn with_info_cart(mut self) -> Result<Gb<S, HeaderInfo>, Error> {
+        println!("Reading ROM bank 000\n");
+        let (_, bank0) = self.rpc_cli.gb_read((0x0000u16, ROM_BANK_SIZE))?;
+        let info = self.load_info(&bank0)?;
+        Ok(Gb {
+            rpc_cli: self.rpc_cli,
+            info,
+            bank0,
+        })
+    }
+
+    fn with_info_rom(mut self, rom: &[u8]) -> Result<Gb<S, HeaderInfo>, Error> {
+        let mut bank0 = Vec::new();
+        let n = cmp::min(rom.len(), ROM_BANK_SIZE as usize);
+        bank0.extend_from_slice(&rom[..n]);
+        let info = self.load_info(&bank0)?;
+        Ok(Gb {
+            rpc_cli: self.rpc_cli,
+            info,
+            bank0,
+        })
+    }
+
+    fn load_info(&mut self, bank0: &[u8]) -> Result<HeaderInfo, Error> {
+        let info = match parse_header(&bank0) {
+            Ok(header_info) => header_info,
+            Err(e) => {
+                print_hex(&bank0[..0x200], 0x0000);
+                return Err(Error::Generic(format!(
+                    "Error parsing cartridge header: {:?}",
+                    e
+                )));
+            }
+        };
+        print_header(&info);
+        println!();
+        let checksum = header_checksum(&bank0);
+        if info.checksum != checksum {
+            return Err(Error::Generic(format!(
+                "Header checksum mismatch: {:02x} != {:02x}",
+                info.checksum, checksum
+            )));
+        }
+        Ok(info)
+    }
+
+    fn switch_bank_mc(&mut self, mc: &MemController, mem: &Memory, bank: u16) -> Result<(), Error> {
+        let mut writes: Vec<(u16, u8)> = Vec::new();
+        match mc {
+            MemController::None => {
+                if bank != 1 {
+                    return Err(Error::Generic(format!(
+                        "ROM Only cartridges can't select bank"
+                    )));
+                }
+            }
+            MemController::Mbc1 => {
+                match mem {
+                    Memory::Rom => {
+                        writes.push((0x6000, 0x00)); // Select ROM Banking Mode for upper two bits
+                        writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
+                        writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
+                    }
+                    Memory::Ram => {
+                        writes.push((0x6000, 0x01)); // Select RAM Banking Mode
+                        writes.push((0x4000, (bank as u8) & 0x03)); // Set bank bits 0..4
+                    }
+                }
+            }
+            MemController::Mbc5 => {
+                match mem {
+                    Memory::Rom => {
+                        writes.push((0x2000, ((bank) & 0x00ff) as u8)); // Set bank bits 0..7
+                        writes.push((0x3000, (((bank) & 0x0100) >> 8) as u8));
+                        // Set bank bit 8
+                    }
+                    Memory::Ram => {
+                        writes.push((0x4000, (bank as u8) & 0x0f)); // Set bank bits 0..4
+                    }
+                }
+            }
+            mc => {
+                return Err(Error::Generic(format!(
+                    "Error: Memory controller {:?} not implemented yet",
+                    mc
+                )));
+            }
+        }
+        for (addr, data) in writes {
+            self.rpc_cli.gb_write_word((addr, data))?;
+        }
+        Ok(())
+    }
+
+    fn ram_enable(&mut self) -> Result<(), Error> {
+        Ok(self.rpc_cli.gb_write_word((0x0000, 0x0A))?)
+    }
+
+    fn ram_disable(&mut self) -> Result<(), Error> {
+        Ok(self.rpc_cli.gb_write_word((0x0000, 0x00))?)
+    }
+
+    fn flash_erase(&mut self) -> Result<(), Error> {
+        let start = Instant::now();
+        self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, 1)?;
+
+        let writes = vec![
+            (0x0AAA, 0xA9),
+            (0x0555, 0x56),
+            (0x0AAA, 0x80),
+            (0x0AAA, 0xA9),
+            (0x0555, 0x56),
+            (0x0AAA, 0x10), // All
+                            //(0x0000, 0x30), // First segment
+        ];
+
+        println!("Erasing flash, wait...");
+        for (addr, data) in writes {
+            self.rpc_cli.gb_write_word((addr, data))?;
+        }
+
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            let (_, buf) = self.rpc_cli.gb_read((0x0000, 1))?;
+            if buf[0] == 0xFF {
+                break;
+            }
+            if buf[0] != 0x4c && buf[0] != 0x08 {
+                return Err(Error::Generic(format!(
+                    "Received incorrect erasing status 0x{:02x}, check the cartridge connection",
+                    buf[0]
+                )));
+            }
+        }
+        self.rpc_cli.gb_write_word((0x0000, 0xFF))?; // Reset
+
+        let dur = start.elapsed();
+        let dur_millis = dur.as_secs() * 1000 + dur.subsec_millis() as u64;
+        println!(
+            "Flash erased in {}m {}s",
+            dur_millis / 1000 / 60,
+            (dur_millis / 1000) % 60,
+        );
+        Ok(())
+    }
+
+    fn flash_write(&mut self, rom: &[u8], erase: bool) -> Result<(), Error> {
+        let info = self.load_info(rom)?;
+        match info.mem_controller {
+            MemController::None => (),
+            MemController::Mbc1 => {
+                if info.rom_banks > 0x20 {
+                    return Err(Error::Generic(format!(
+                        "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
+                        0x1f, info.rom_banks
+                    )));
+                }
+            }
+            MemController::Mbc5 => (),
+            ref mc => {
+                return Err(Error::Generic(format!("{:?} is not MBC5-compatible", mc)));
+            }
+        }
+
+        if erase {
+            self.flash_erase()?;
+        }
+
+        let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
+        let mut pb = new_progress_bar(n as u64);
+        let start = Instant::now();
+        for bank in 0..info.rom_banks {
+            if bank != 0 {
+                self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, bank)?;
+            }
+            // let addr = if bank == 0 { 0x0000 } else { ROM_BANK_SIZE };
+            // let rom_pos = (bank * ROM_BANK_SIZE) as usize;
+            // let fail = self
+            //     .rpc_cli
+            //     .gb_flash_write(addr, &rom[rom_pos..rom_pos + ROM_BANK_SIZE as usize])?;
+            // if let Some((fail_addr, fail_byte)) = fail {
+            //     return Err(Error::Generic(format!(
+            //         "gb_flash_write failed writting address 0x{:04x}.  Expected 0x{:02x}, got 0x{:02x}",
+            //         fail_addr,
+            //         rom[rom_pos + fail_addr as usize],
+            //         fail_byte,
+            //     )));
+            // }
+            let addr = if bank == 0 { 0x0000 } else { ROM_BANK_SIZE };
+            let rom_pos = (bank * ROM_BANK_SIZE) as usize;
+            let mut i = 0;
+            loop {
+                let fail = self.rpc_cli.gb_flash_write(
+                    addr + i,
+                    &rom[rom_pos + i as usize..rom_pos + ROM_BANK_SIZE as usize],
+                )?;
+                if let Some((fail_addr, fail_byte)) = fail {
+                    println!(
+                        "gb_flash_write failed writting address 0x{:04x}.  Expected 0x{:02x}, got 0x{:02x}",
+                        fail_addr,
+                        rom[rom_pos + fail_addr as usize],
+                        fail_byte,
+                    );
+                    i = (fail_addr - addr) + 1;
+                    if i == ROM_BANK_SIZE {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            // if !ok {
+            //     return Err(Error::Generic(format!(
+            //         "gb_flash_write write byte polling timeout"
+            //     )));
+            // }
+            pb.add(ROM_BANK_SIZE as u64);
+        }
+        let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
+        progress_bar_finish(&mut pb, "Flashing ROM", n, start.elapsed());
+
+        Ok(())
+    }
+}
+
+impl<S: io::Read + io::Write> Gb<S, HeaderInfo> {
+    fn read(&mut self, mut file: &fs::File, memory: Memory) -> Result<(), Error> {
+        let start = Instant::now();
+
+        let mut mem = Vec::new();
+        let (mut pb, n, action) = match memory {
+            Memory::Rom => {
+                let n = ROM_BANK_SIZE as usize * self.info.rom_banks as usize;
+                let mut pb = new_progress_bar(n as u64);
+                mem.extend_from_slice(&self.bank0);
+                let addr = 0x4000u16;
+                for bank in 1..self.info.rom_banks {
+                    self.switch_bank(&memory, bank)?;
+                    let (_, buf) = self.rpc_cli.gb_read((addr, ROM_BANK_SIZE))?;
+                    mem.extend_from_slice(&buf);
+                    pb.add(ROM_BANK_SIZE as u64);
+                }
+                (pb, n, "Reading ROM")
+            }
+            Memory::Ram => {
+                let n = self.info.ram_size;
+                let mut pb = new_progress_bar(n as u64);
+                self.ram_enable()?;
+                let addr = 0xA000u16;
+                let size = cmp::min(self.info.ram_size as u16, RAM_BANK_SIZE);
+                for bank in 0..self.info.ram_banks {
+                    self.switch_bank(&memory, bank)?;
+                    let (_, buf) = self.rpc_cli.gb_read((addr, size))?;
+                    mem.extend_from_slice(&buf);
+                    pb.add(RAM_BANK_SIZE as u64);
+                }
+                self.ram_disable()?;
+                (pb, n as usize, "Reading RAM")
+            }
+        };
+
+        progress_bar_finish(&mut pb, action, n, start.elapsed());
+        if let Memory::Rom = memory {
+            let global_checksum = global_checksum(&mem);
+            if self.info.global_checksum != global_checksum {
+                println!(
+                    "Global checksum mismatch: {:02x} != {:02x}",
+                    self.info.global_checksum, global_checksum
+                );
+            } else {
+                println!("Global checksum verification successfull!");
+            }
+        }
+        println!("Writing file...");
+        file.write_all(&mem)?;
+        Ok(())
+    }
+
+    fn switch_bank(&mut self, mem: &Memory, bank: u16) -> Result<(), Error> {
+        let mc = self.info.mem_controller;
+        self.switch_bank_mc(&mc, &mem, bank)
+    }
+
+    fn write_ram(&mut self, sav: &[u8]) -> Result<(), Error> {
+        let start = Instant::now();
+
+        if sav.len() != self.info.ram_size {
+            return Err(Error::Generic(format!(
+                "RAM size mismatch between header and file: {:02x} != {:02x}",
+                self.info.ram_size,
+                sav.len()
+            )));
+        }
+
+        self.ram_enable()?;
+        let addr = 0xA000u16;
+        let size = cmp::min(self.info.ram_size as u16, RAM_BANK_SIZE);
+        let n = RAM_BANK_SIZE as usize * self.info.ram_banks as usize;
+        let mut pb = new_progress_bar(n as u64);
+        for bank in 0..self.info.ram_banks {
+            self.switch_bank(&Memory::Ram, bank)?;
+            let sav_pos = bank as usize * RAM_BANK_SIZE as usize;
+            self.rpc_cli
+                .gb_write(addr, &sav[sav_pos..sav_pos + size as usize])?;
+            pb.add(RAM_BANK_SIZE as u64);
+        }
+        progress_bar_finish(&mut pb, "Writtng RAM", n, start.elapsed());
+
+        Ok(self.ram_disable()?)
     }
 }
 
@@ -550,8 +901,8 @@ enum FilePath<'a> {
 }
 
 enum File<'a> {
-    Read(&'a str, Vec<u8>),
-    Write(&'a str, fs::File),
+    Read(&'a Path, Vec<u8>),
+    Write(&'a Path, fs::File),
     None,
 }
 
@@ -625,19 +976,42 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
     let file = match file_path {
         FilePath::Read(path) => {
             let mut content = Vec::new();
-            fs::OpenOptions::new()
-                .read(true)
-                .open(path)?
-                .read_to_end(&mut content)?;
+            let path = Path::new(path);
+            if path.extension() == Some(OsStr::new("zip")) {
+                let mut zip = ZipArchive::new(fs::File::open(path)?)?;
+                for i in 0..zip.len() {
+                    let mut zip_file = zip.by_index(i).unwrap();
+                    let filename = zip_file.name().to_string();
+                    let extension = Path::new(&filename).extension();
+                    if extension == Some(OsStr::new("gb")) || extension == Some(OsStr::new("gbc")) {
+                        zip_file.read_to_end(&mut content)?;
+                        break;
+                    }
+                }
+                if content.len() == 0 {
+                    return Err(Error::Generic(format!(
+                        "File {} doesn't contain any ROM",
+                        path.display()
+                    )));
+                }
+            } else {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .open(path)?
+                    .read_to_end(&mut content)?;
+            }
             File::Read(path, content)
         }
-        FilePath::Write(path) => File::Write(
-            path,
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?,
-        ),
+        FilePath::Write(path) => {
+            let path = Path::new(path);
+            File::Write(
+                path,
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)?,
+            )
+        }
         FilePath::None => File::None,
     };
 
@@ -646,56 +1020,35 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
 
     let result = match matches.subcommand() {
         ("gb", Some(app)) => {
-            rpc_client.gb_mode(()).unwrap();
-            println!("GB Mode Set");
             match (app.subcommand(), &file) {
                 (("read-rom", _), File::Write(path, file)) => {
-                    println!("Reading cartridge ROM into {}", path);
-                    gb_read(&mut rpc_client, file, Memory::Rom)
+                    let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
+                    println!("Reading cartridge ROM into {}", path.display());
+                    gb.read(file, Memory::Rom)
                 }
                 (("read-ram", _), File::Write(path, file)) => {
-                    println!("Reading cartridge ROM into {}", path);
-                    gb_read(&mut rpc_client, file, Memory::Ram)
+                    let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
+                    println!("Reading cartridge ROM into {}", path.display());
+                    gb.read(file, Memory::Ram)
                 }
-                (("write-rom", _), File::Read(path, content)) => {
-                    unimplemented!()
-                    // UPDATE
-                    // println!("Writing {} into cartridge ROM", path.display());
-                    // let mut rom = Vec::new();
-                    // if path.extension() == Some(OsStr::new("zip")) {
-                    //     let mut zip = ZipArchive::new(File::open(path)?)?;
-                    //     for i in 0..zip.len() {
-                    //         let mut zip_file = zip.by_index(i).unwrap();
-                    //         let filename = zip_file.name().to_string();
-                    //         let extension = Path::new(&filename).extension();
-                    //         if extension == Some(OsStr::new("gb")) || extension == Some(OsStr::new("gbc")) {
-                    //             zip_file.read_to_end(&mut rom)?;;
-                    //             break;
-                    //         }
-                    //     }
-                    //     if rom.len() == 0 {
-                    //         return Err(Error::Generic(format!(
-                    //             "File {} doesn't contain any ROM",
-                    //             path.display()
-                    //         )));
-                    //     }
-                    // } else {
-                    //     OpenOptions::new()
-                    //         .read(true)
-                    //         .open(path)?
-                    //         .read_to_end(&mut rom)?;
-                    // }
-                    // write_flash(&mut port, &rom)
+                (("write-rom", Some(app)), File::Read(path, content)) => {
+                    let mut gb = Gb::new(rpc_client)?.with_info_rom(&content)?;
+                    println!("Writing {} into cartridge ROM", path.display());
+                    gb.flash_write(&content, !app.is_present("noerase"))
                 }
                 (("write-ram", _), File::Read(path, content)) => {
-                    println!("Writing {} into cartridge RAM", path);
-                    gb_write_ram(&mut rpc_client, &content)
+                    let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
+                    println!("Writing {} into cartridge RAM", path.display());
+                    gb.write_ram(&content)
+                }
+                (("erase", _), _) => {
+                    let mut gb = Gb::new(rpc_client)?;
+                    println!("Erasing flash");
+                    gb.flash_erase()
                 }
                 ((cmd, _), _) => {
                     panic!("Unexpected subcommand: {}", cmd);
                 }
-                // UPDATE
-                // ("erase", Some(_)) => erase(&mut port),
                 // UPDATE
                 // ("read", Some(_)) => read_test(&mut port),
             }
@@ -738,7 +1091,6 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
             panic!("Unexpected subcommand: {}", cmd);
         }
     };
-    println!();
 
     // Error cleanup
     if result.is_err() {
@@ -747,161 +1099,6 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
         }
     }
     result
-}
-
-fn gb_read<S: io::Read + io::Write>(
-    mut rpc_client: &mut rpc::Client<S>,
-    mut file: &fs::File,
-    memory: Memory,
-) -> Result<(), Error> {
-    let start = Instant::now();
-    let (header_info, buf, header_checksum) = gb_read_header(&mut rpc_client)?;
-
-    print_header(&header_info);
-    println!();
-
-    if header_info.checksum != header_checksum {
-        return Err(Error::Generic(format!(
-            "Header checksum mismatch: {:02x} != {:02x}",
-            header_info.checksum, header_checksum
-        )));
-    }
-
-    let mut mem = Vec::new();
-    let (elapsed, mut pb, n) = match memory {
-        Memory::Rom => {
-            let mut pb = ProgressBar::new(ROM_BANK_SIZE as u64 * header_info.rom_banks as u64);
-            pb.set_units(Units::Bytes);
-            pb.format("[=> ]");
-            mem.extend_from_slice(&buf);
-            let addr = 0x4000 as u16;
-            for bank in 1..header_info.rom_banks {
-                // println!("Switching to ROM bank {:03}", bank);
-                switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
-                // println!("Reading ROM bank {:03}", bank);
-                let (_, buf) = rpc_client.gb_read((addr, ROM_BANK_SIZE)).unwrap();
-                mem.extend_from_slice(&buf);
-                pb.add(ROM_BANK_SIZE as u64);
-            }
-            (
-                start.elapsed(),
-                pb,
-                ROM_BANK_SIZE as usize * header_info.rom_banks,
-            )
-        }
-        Memory::Ram => {
-            let mut pb = ProgressBar::new(header_info.ram_size as u64);
-            pb.set_units(Units::Bytes);
-            pb.format("[=> ]");
-            ram_enable(&mut rpc_client)?;
-            let addr = 0xA000 as u16;
-            let size = cmp::min(header_info.ram_size as u16, RAM_BANK_SIZE);
-            for bank in 0..header_info.ram_banks {
-                // println!("Switching to RAM bank {:03}", bank);
-                switch_bank(&mut rpc_client, &header_info.mem_controller, &memory, bank)?;
-                // println!("Reading RAM bank {:03}", bank);
-                let (_, buf) = rpc_client.gb_read((addr, size)).unwrap();
-                mem.extend_from_slice(&buf);
-                pb.add(RAM_BANK_SIZE as u64);
-            }
-            let elapsed = start.elapsed();
-            ram_disable(&mut rpc_client)?;
-            (elapsed, pb, size as usize * header_info.ram_banks)
-        }
-    };
-
-    let elapsed_millis = cmp::max(elapsed.as_secs() * 1000 + elapsed.subsec_millis() as u64, 1);
-    pb.finish_print(&format!(
-        "Reading {} finished in {}m {}s at {:.02} KB/s",
-        match memory {
-            Memory::Rom => "ROM",
-            Memory::Ram => "RAM",
-        },
-        elapsed_millis / 1000 / 60,
-        (elapsed_millis / 1000) % 60,
-        n as f64 / 1024.0 / (elapsed_millis as f64 / 1000.0)
-    ));
-    if let Memory::Rom = memory {
-        let global_checksum = global_checksum(&mem);
-        if header_info.global_checksum != global_checksum {
-            println!(
-                "Global checksum mismatch: {:02x} != {:02x}",
-                header_info.global_checksum, global_checksum
-            );
-        } else {
-            println!("Global checksum verification successfull!");
-        }
-    }
-    println!("Writing file...");
-    file.write_all(&mem)?;
-    Ok(())
-}
-
-fn switch_bank<S: io::Read + io::Write>(
-    mut rpc_client: &mut rpc::Client<S>,
-    mem_controller: &MemController,
-    memory: &Memory,
-    bank: usize,
-) -> Result<(), Error> {
-    let mut writes: Vec<(u16, u8)> = Vec::new();
-    match *mem_controller {
-        MemController::None => {
-            if bank != 1 {
-                return Err(Error::Generic(format!(
-                    "ROM Only cartridges can't select bank"
-                )));
-            }
-        }
-        MemController::Mbc1 => {
-            match *memory {
-                Memory::Rom => {
-                    writes.push((0x6000, 0x00)); // Select ROM Banking Mode for upper two bits
-                    writes.push((0x2000, (bank as u8) & 0x1f)); // Set bank bits 0..4
-                    writes.push((0x4000, ((bank as u8) & 0x60) >> 5)); // Set bank bits 5,6
-                }
-                Memory::Ram => {
-                    writes.push((0x6000, 0x01)); // Select RAM Banking Mode
-                    writes.push((0x4000, (bank as u8) & 0x03)); // Set bank bits 0..4
-                }
-            }
-        }
-        MemController::Mbc5 => {
-            match *memory {
-                Memory::Rom => {
-                    writes.push((0x2000, ((bank as u16) & 0x00ff) as u8)); // Set bank bits 0..7
-                    writes.push((0x3000, (((bank as u16) & 0x0100) >> 8) as u8));
-                    // Set bank bit 8
-                }
-                Memory::Ram => {
-                    writes.push((0x4000, (bank as u8) & 0x0f)); // Set bank bits 0..4
-                }
-            }
-        }
-        ref mc => {
-            return Err(Error::Generic(format!(
-                "Error: Memory controller {:?} not implemented yet",
-                mc
-            )));
-        }
-    }
-    for (addr, data) in writes {
-        rpc_client.gb_write_word((addr, data)).unwrap();
-    }
-    Ok(())
-}
-
-fn ram_enable<S: io::Read + io::Write>(
-    mut rpc_client: &mut rpc::Client<S>,
-) -> Result<(), io::Error> {
-    rpc_client.gb_write_word((0x0000, 0x0A)).unwrap();
-    Ok(())
-}
-
-fn ram_disable<S: io::Read + io::Write>(
-    mut rpc_client: &mut rpc::Client<S>,
-) -> Result<(), io::Error> {
-    rpc_client.gb_write_word((0x0000, 0x00)).unwrap();
-    Ok(())
 }
 
 // UPDATE
@@ -1356,8 +1553,8 @@ fn gb_read_header<S: io::Read + io::Write>(
     mut rpc_client: &mut rpc::Client<S>,
 ) -> Result<(HeaderInfo, Vec<u8>, u8), Error> {
     println!("Reading ROM bank 000");
-    let addr = 0x0000 as u16;
-    let (_, buf) = rpc_client.gb_read((addr, ROM_BANK_SIZE)).unwrap();
+    let addr = 0x0000u16;
+    let (_, buf) = rpc_client.gb_read((addr, ROM_BANK_SIZE))?;
 
     println!();
 
@@ -1372,57 +1569,6 @@ fn gb_read_header<S: io::Read + io::Write>(
     };
     let checksum = header_checksum(&buf);
     Ok((info, buf, checksum))
-}
-
-fn gb_write_ram<S: io::Read + io::Write>(
-    mut rpc_client: &mut rpc::Client<S>,
-    sav: &[u8],
-) -> Result<(), Error> {
-    let start = Instant::now();
-    let (header_info, _, header_checksum) = gb_read_header(&mut rpc_client)?;
-
-    print_header(&header_info);
-    println!();
-
-    if header_info.checksum != header_checksum {
-        return Err(Error::Generic(format!(
-            "Header checksum mismatch: {:02x} != {:02x}",
-            header_info.checksum, header_checksum
-        )));
-    }
-
-    if sav.len() != header_info.ram_size {
-        return Err(Error::Generic(format!(
-            "RAM size mismatch between header and file: {:02x} != {:02x}",
-            header_info.ram_size,
-            sav.len()
-        )));
-    }
-
-    ram_enable(&mut rpc_client)?;
-    let addr = 0xA000 as u16;
-    let size = cmp::min(header_info.ram_size as u16, RAM_BANK_SIZE);
-    let mut pb = ProgressBar::new(RAM_BANK_SIZE as u64 * header_info.ram_banks as u64);
-    pb.set_units(Units::Bytes);
-    pb.format("[=> ]");
-    for bank in 0..header_info.ram_banks {
-        // println!("Switching to RAM bank {:03}", bank);
-        switch_bank(
-            &mut rpc_client,
-            &header_info.mem_controller,
-            &Memory::Ram,
-            bank,
-        )?;
-        // println!("Reading RAM bank {:03}", bank);
-        let sav_pos = bank * RAM_BANK_SIZE as usize;
-        rpc_client
-            .gb_write(addr, &sav[sav_pos..sav_pos + size as usize])
-            .unwrap();
-        pb.add(RAM_BANK_SIZE as u64);
-    }
-
-    ram_disable(&mut rpc_client)?;
-    Ok(())
 }
 
 // UPDATE
