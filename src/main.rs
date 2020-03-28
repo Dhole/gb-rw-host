@@ -8,6 +8,7 @@ extern crate urpc;
 extern crate enum_primitive;
 extern crate bufstream;
 extern crate clap;
+extern crate log;
 extern crate num;
 extern crate pbr;
 extern crate serde;
@@ -34,6 +35,7 @@ use urpc::{
 
 use bufstream::BufStream;
 use clap::{App, Arg, ArgMatches, SubCommand};
+use log::{error, info, warn};
 use num::iter::range_step;
 use pbr::{ProgressBar, Units};
 use serial::prelude::*;
@@ -110,6 +112,12 @@ mod rpc {
 }
 
 fn main() {
+    if let None = std::env::var_os(env_logger::DEFAULT_FILTER_ENV) {
+        std::env::set_var(env_logger::DEFAULT_FILTER_ENV, "info");
+    }
+    env_logger::Builder::from_default_env()
+        .format_timestamp(None)
+        .init();
     let arg_file = Arg::with_name("file")
         .help("Set the file to read/write for the cartridge ROM/RAM")
         .short("f")
@@ -235,7 +243,7 @@ fn main() {
     }
 
     run_subcommand(matches).unwrap_or_else(|e| {
-        println!("Error during operation: {:?}", e);
+        error!("Error during operation: {:?}", e);
         process::exit(1);
     });
 }
@@ -281,9 +289,9 @@ impl<T: SerialPort> Device<T> {
                 println!("Press the reset button on the board");
             }
             Board::St => {
-                println!("\nResetting board using st-flash utility...");
+                info!("Resetting board using st-flash utility...");
                 let output = Command::new("st-flash").arg("reset").output()?;
-                println!("{}", String::from_utf8_lossy(&output.stderr));
+                info!("\n{}", String::from_utf8_lossy(&output.stderr));
                 if !output.status.success() {
                     return Err(Error::Generic(format!(
                         "st-flash returned with error code {:?}",
@@ -436,19 +444,20 @@ fn progress_bar_finish<T: io::Write>(
     dur: Duration,
 ) {
     let dur_millis = cmp::max(dur.as_secs() * 1000 + dur.subsec_millis() as u64, 1);
-    pb.finish_print(&format!(
+    pb.finish();
+    info!(
         "{} finished in {}m {}s at {:.02} KB/s",
         action,
         dur_millis / 1000 / 60,
         (dur_millis / 1000) % 60,
         n as f64 / 1024.0 / (dur_millis as f64 / 1000.0)
-    ));
+    );
 }
 
 impl<S: io::Read + io::Write> Gb<S, ()> {
     fn new(mut rpc_client: rpc::Client<S>) -> Result<Self, Error> {
         rpc_client.mode(rpc::ReqMode::GB)?;
-        println!("GB Mode Set");
+        info!("GB Mode Set");
 
         Ok(Self {
             rpc_cli: rpc_client,
@@ -460,7 +469,7 @@ impl<S: io::Read + io::Write> Gb<S, ()> {
 
 impl<S: io::Read + io::Write, I> Gb<S, I> {
     fn with_info_cart(mut self) -> Result<Gb<S, HeaderInfo>, Error> {
-        println!("Reading ROM bank 000\n");
+        info!("Reading ROM bank 000\n");
         let (_, bank0) = self.rpc_cli.gb_read((0x0000u16, ROM_BANK_SIZE))?;
         let info = self.load_info(&bank0)?;
         Ok(Gb {
@@ -493,8 +502,7 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                 )));
             }
         };
-        print_header(&info);
-        println!();
+        info!("\n{}", info);
         let checksum = header_checksum(&bank0);
         if info.checksum != checksum {
             return Err(Error::Generic(format!(
@@ -575,7 +583,7 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                             //(0x0000, 0x30), // First segment
         ];
 
-        println!("Erasing flash, wait...");
+        info!("Erasing flash, wait...");
         for (addr, data) in writes {
             self.rpc_cli.gb_write_word((addr, data))?;
         }
@@ -597,7 +605,7 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
 
         let dur = start.elapsed();
         let dur_millis = dur.as_secs() * 1000 + dur.subsec_millis() as u64;
-        println!(
+        info!(
             "Flash erased in {}m {}s",
             dur_millis / 1000 / 60,
             (dur_millis / 1000) % 60,
@@ -634,21 +642,8 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
             if bank != 0 {
                 self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, bank)?;
             }
-            // let addr = if bank == 0 { 0x0000 } else { ROM_BANK_SIZE };
-            // let rom_pos = (bank * ROM_BANK_SIZE) as usize;
-            // let fail = self
-            //     .rpc_cli
-            //     .gb_flash_write(addr, &rom[rom_pos..rom_pos + ROM_BANK_SIZE as usize])?;
-            // if let Some((fail_addr, fail_byte)) = fail {
-            //     return Err(Error::Generic(format!(
-            //         "gb_flash_write failed writting address 0x{:04x}.  Expected 0x{:02x}, got 0x{:02x}",
-            //         fail_addr,
-            //         rom[rom_pos + fail_addr as usize],
-            //         fail_byte,
-            //     )));
-            // }
             let addr = if bank == 0 { 0x0000 } else { ROM_BANK_SIZE };
-            let rom_pos = (bank * ROM_BANK_SIZE) as usize;
+            let rom_pos = (bank as usize * ROM_BANK_SIZE as usize);
             let mut i = 0;
             loop {
                 let fail = self.rpc_cli.gb_flash_write(
@@ -656,8 +651,8 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                     &rom[rom_pos + i as usize..rom_pos + ROM_BANK_SIZE as usize],
                 )?;
                 if let Some((fail_addr, fail_byte)) = fail {
-                    println!(
-                        "gb_flash_write failed writting address 0x{:04x}.  Expected 0x{:02x}, got 0x{:02x}",
+                    warn!(
+                        "gb_flash_write write error at address 0x{:04x}.  Expected 0x{:02x}, got 0x{:02x}",
                         fail_addr,
                         rom[rom_pos + fail_addr as usize],
                         fail_byte,
@@ -724,15 +719,15 @@ impl<S: io::Read + io::Write> Gb<S, HeaderInfo> {
         if let Memory::Rom = memory {
             let global_checksum = global_checksum(&mem);
             if self.info.global_checksum != global_checksum {
-                println!(
-                    "Global checksum mismatch: {:02x} != {:02x}",
+                warn!(
+                    "Global checksum mismatch: {:04x} != {:04x}",
                     self.info.global_checksum, global_checksum
                 );
             } else {
-                println!("Global checksum verification successfull!");
+                info!("Global checksum verification successfull!");
             }
         }
-        println!("Writing file...");
+        info!("Writing file...");
         file.write_all(&mem)?;
         Ok(())
     }
@@ -814,33 +809,6 @@ enum ReplyCmd {
 }
 }
 
-fn cmd_gb_read(addr_start: u16, addr_end: u16) -> [u8; 5] {
-    let start = addr_start.to_le_bytes();
-    let end = addr_end.to_le_bytes();
-    [Cmd::Read as u8, start[0], start[1], end[0], end[1]]
-}
-
-fn cmd_gb_write_byte(addr: u16, data: u8) -> [u8; 5] {
-    let addr = addr.to_le_bytes();
-    [Cmd::Write as u8, addr[0], addr[1], data, 0x00]
-}
-
-fn cmd_gb_flash_write(addr_start: u16, addr_end: u16) -> [u8; 5] {
-    let start = addr_start.to_le_bytes();
-    let end = addr_end.to_le_bytes();
-    [Cmd::WriteFlash as u8, start[0], start[1], end[0], end[1]]
-}
-
-fn cmd_gb_write(addr_start: u16, addr_end: u16) -> [u8; 5] {
-    let start = addr_start.to_le_bytes();
-    let end = addr_end.to_le_bytes();
-    [Cmd::WriteRaw as u8, start[0], start[1], end[0], end[1]]
-}
-
-fn cmd_ping() -> [u8; 1] {
-    [Cmd::Ping as u8]
-}
-
 fn cmd_mode_gba() -> [u8; 1] {
     [Cmd::ModeGBA as u8]
 }
@@ -912,17 +880,17 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
     let board = match matches.value_of("board").unwrap() {
         "generic" => Board::Generic,
         "st" => Board::St,
-        board => panic!("Invalid board: {}", board),
+        board => return Err(Error::Generic(format!("Invalid board: {}", board))),
     };
     let reset = !matches.is_present("no-reset");
 
-    println!("Development board is: {:?}", board);
-    println!("Using serial device: {} at baud rate: {}", serial, baud);
+    info!("Development board is: {:?}", board);
+    info!("Using serial device: {} at baud rate: {}", serial, baud);
 
     let mut port_raw = match serial::open(serial) {
         Ok(port) => port,
         Err(e) => {
-            println!("Error opening {}: {}", serial, e);
+            error!("Error opening {}: {}", serial, e);
             process::exit(1);
         }
     };
@@ -935,13 +903,13 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
             flow_control: serial::FlowNone,
         })
         .unwrap_or_else(|e| {
-            println!("Error configuring {}: {}", serial, e);
+            error!("Error configuring {}: {}", serial, e);
             process::exit(1);
         });
     port_raw
         .set_timeout(Duration::from_secs(16))
         .unwrap_or_else(|e| {
-            println!("Error setting timeout for {}: {}", serial, e);
+            error!("Error setting timeout for {}: {}", serial, e);
             process::exit(1);
         });
     let mut device = Device::new(port_raw, board);
@@ -949,10 +917,10 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
 
     if reset {
         device.reset().unwrap_or_else(|e| {
-            println!("Error resetting development board: {:?}", e);
+            error!("Error resetting development board: {:?}", e);
             process::exit(1);
         });
-        println!("Connected!");
+        info!("Connected!");
     }
 
     let (mode, cmd, path) = match matches.subcommand() {
@@ -1023,31 +991,31 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
             match (app.subcommand(), &file) {
                 (("read-rom", _), File::Write(path, file)) => {
                     let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
-                    println!("Reading cartridge ROM into {}", path.display());
+                    info!("Reading cartridge ROM into {}", path.display());
                     gb.read(file, Memory::Rom)
                 }
                 (("read-ram", _), File::Write(path, file)) => {
                     let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
-                    println!("Reading cartridge ROM into {}", path.display());
+                    info!("Reading cartridge ROM into {}", path.display());
                     gb.read(file, Memory::Ram)
                 }
                 (("write-rom", Some(app)), File::Read(path, content)) => {
-                    let mut gb = Gb::new(rpc_client)?.with_info_rom(&content)?;
-                    println!("Writing {} into cartridge ROM", path.display());
+                    let mut gb = Gb::new(rpc_client)?;
+                    info!("Writing {} into cartridge ROM", path.display());
                     gb.flash_write(&content, !app.is_present("noerase"))
                 }
                 (("write-ram", _), File::Read(path, content)) => {
                     let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
-                    println!("Writing {} into cartridge RAM", path.display());
+                    info!("Writing {} into cartridge RAM", path.display());
                     gb.write_ram(&content)
                 }
                 (("erase", _), _) => {
                     let mut gb = Gb::new(rpc_client)?;
-                    println!("Erasing flash");
+                    info!("Erasing flash");
                     gb.flash_erase()
                 }
                 ((cmd, _), _) => {
-                    panic!("Unexpected subcommand: {}", cmd);
+                    Err(Error::Generic(format!("Unexpected subcommand: {}", cmd)))
                 }
                 // UPDATE
                 // ("read", Some(_)) => read_test(&mut port),
@@ -1082,14 +1050,10 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                     //     .read_to_end(&mut rom)?;
                     // write_gba_rom_test(&mut Gba::new(device)?, &rom)
                 }
-                (cmd, _) => {
-                    panic!("Unexpected subcommand: {}", cmd);
-                }
+                (cmd, _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
             }
         }
-        (cmd, _) => {
-            panic!("Unexpected subcommand: {}", cmd);
-        }
+        (cmd, _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
     };
 
     // Error cleanup
@@ -1101,84 +1065,6 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
     result
 }
 
-// UPDATE
-// fn erase<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
-//     erase_flash(&mut port)?;
-//     Ok(())
-// }
-
-// UPDATE
-// fn erase_flash<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
-//     switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
-//
-//     let writes = vec![
-//         (0x0AAA, 0xA9),
-//         (0x0555, 0x56),
-//         (0x0AAA, 0x80),
-//         (0x0AAA, 0xA9),
-//         (0x0555, 0x56),
-//         (0x0AAA, 0x10), // All
-//                         //(0x0000, 0x30), // First segment
-//     ];
-//
-//     println!("Erasing flash, wait...");
-//     for (addr, data) in writes {
-//         port.write_all(cmd_gb_write_byte(addr, data).as_slice())?;
-//     }
-//     port.flush()?;
-//
-//     loop {
-//         thread::sleep(Duration::from_millis(500));
-//         port.write_all(cmd_gb_read(0x0000, 0x0001).as_slice())?;
-//         port.flush()?;
-//         let mut buf = vec![0; 1];
-//         port.read_exact(&mut buf)?;
-//         if buf[0] == 0xFF {
-//             //println!("");
-//             break;
-//         }
-//         if buf[0] != 0x4c && buf[0] != 0x08 {
-//             return Err(Error::Generic(format!(
-//                 "Received incorrect erasing status 0x{:02x}, check the cartridge connection",
-//                 buf[0]
-//             )));
-//         }
-//         //print!("{:02x} ", buf[0]);
-//         //io::stdout().flush()?;
-//     }
-//     println!("OK!");
-//
-//     Ok(())
-// }
-
-// UPDATE
-// fn read_test<T: SerialPort>(mut port: &mut BufStream<T>) -> Result<(), Error> {
-//     switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, 1)?;
-//
-//     let addr_start = 0x0000 as u16;
-//     let addr_end = 0x4000 as u16;
-//     port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
-//     port.flush()?;
-//
-//     let mut buf = vec![0; (addr_end - addr_start) as usize];
-//     port.read_exact(&mut buf)?;
-//
-//     print_hex(&buf[0x0000..0x0200], 0x0000);
-//     println!();
-//
-//     let addr_start = 0x4000 as u16;
-//     let addr_end = 0x8000 as u16;
-//     port.write_all(cmd_gb_read(addr_start, addr_end).as_slice())?;
-//     port.flush()?;
-//
-//     let mut buf = vec![0; (addr_end - addr_start) as usize];
-//     port.read_exact(&mut buf)?;
-//
-//     print_hex(&buf[0x0000..0x0200], 0x4000);
-//     println!();
-//     Ok(())
-// }
-
 fn gba_read_rom<T: SerialPort>(
     gba: &mut Gba<T>,
     mut file: &fs::File,
@@ -1187,7 +1073,7 @@ fn gba_read_rom<T: SerialPort>(
     let size = match size {
         None => {
             let s = guess_gba_rom_size(gba)?;
-            println!("Guessed ROM size: {}MB ({}MBits)", s, s * 8);
+            info!("Guessed ROM size: {}MB ({}MBits)", s, s * 8);
             s
         }
         Some(s) => s,
@@ -1548,97 +1434,3 @@ fn guess_gba_rom_size<T: SerialPort>(gba: &mut Gba<T>) -> Result<u32, Error> {
     }
     Err(Error::Generic(format!("Unable to guess gba rom size")))
 }
-
-fn gb_read_header<S: io::Read + io::Write>(
-    mut rpc_client: &mut rpc::Client<S>,
-) -> Result<(HeaderInfo, Vec<u8>, u8), Error> {
-    println!("Reading ROM bank 000");
-    let addr = 0x0000u16;
-    let (_, buf) = rpc_client.gb_read((addr, ROM_BANK_SIZE))?;
-
-    println!();
-
-    let info = match parse_header(&buf) {
-        Ok(header_info) => header_info,
-        Err(e) => {
-            return Err(Error::Generic(format!(
-                "Error parsing cartridge header: {:?}",
-                e
-            )));
-        }
-    };
-    let checksum = header_checksum(&buf);
-    Ok((info, buf, checksum))
-}
-
-// UPDATE
-// fn write_flash<T: SerialPort>(
-//     mut port: &mut BufStream<T>,
-//     //mut file: &File,
-//     rom: &[u8],
-// ) -> Result<(), Error> {
-//     let header_info = match parse_header(rom) {
-//         Ok(header_info) => header_info,
-//         Err(e) => {
-//             return Err(Error::Generic(format!("Error parsing rom header: {:?}", e)));
-//         }
-//     };
-//
-//     println!("ROM header info:");
-//     println!();
-//     print_header(&header_info);
-//     println!();
-//
-//     match header_info.mem_controller {
-//         MemController::None => (),
-//         MemController::Mbc1 => {
-//             if header_info.rom_banks > 0x20 {
-//                 return Err(Error::Generic(format!(
-//                     "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
-//                     0x1f, header_info.rom_banks
-//                 )));
-//             }
-//         }
-//         MemController::Mbc5 => (),
-//         ref mc => {
-//             return Err(Error::Generic(format!("{:?} is not MBC5-compatible", mc)));
-//         }
-//     }
-//
-//     erase_flash(&mut port)?;
-//     println!();
-//
-//     let mut reply = vec![0; 1];
-//     for bank in 0..header_info.rom_banks {
-//         if bank != 0 {
-//             println!("Switching to ROM bank {:03}", bank);
-//             switch_bank(&mut port, &MemController::Mbc5, &Memory::Rom, bank)?;
-//         }
-//         let addr_start = if bank == 0 { 0x0000 } else { 0x4000 };
-//
-//         loop {
-//             port.write_all(cmd_gb_flash_write(addr_start, addr_start + 0x4000).as_slice())?;
-//             port.flush()?;
-//
-//             port.read_exact(&mut reply)?;
-//             if reply[0] == CmdReply::DMAReady as u8 {
-//                 break;
-//             }
-//             thread::sleep(Duration::from_millis(100));
-//         }
-//         println!("Writing ROM bank {:03}...", bank);
-//         port.write_all(&rom[bank * 0x4000..bank * 0x4000 + 0x4000])?;
-//         port.flush()?;
-//     }
-//
-//     println!("Waiting for confirmation...");
-//     port.write_all(cmd_ping().as_slice())?;
-//     port.flush()?;
-//     port.read_exact(&mut reply)?;
-//     if reply[0] == CmdReply::Pong as u8 {
-//         println!("OK!");
-//         Ok(())
-//     } else {
-//         Err(Error::Generic(format!("Unexpected reply to ping")))
-//     }
-// }

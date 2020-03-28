@@ -1,4 +1,5 @@
 use num::FromPrimitive;
+use std::fmt;
 use std::num::Wrapping;
 
 use utils;
@@ -135,6 +136,23 @@ pub struct HeaderInfo {
     pub destination: Destination,
     pub checksum: u8,
     pub global_checksum: u16,
+}
+
+impl fmt::Display for HeaderInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ROM Title: {}\n", self.title)?;
+        write!(f, "Color Gameboy compatibility: {:?}\n", self.cgb)?;
+        write!(f, "License: {:?}\n", self.license)?;
+        write!(f, "Cartridge type:    {:?}\n", self.cart_type)?;
+        write!(f, "Memory controller: {:?}\n", self.mem_controller)?;
+        write!(f, "Rom banks: {}\n", self.rom_banks)?;
+        write!(f, "Ram banks: {}\n", self.ram_banks)?;
+        write!(f, "Ram size:  {} KB\n", self.ram_size / 1000)?;
+        write!(f, "Destination: {:?}\n", self.destination)?;
+        write!(f, "Checksum:  {:02x}\n", self.checksum)?;
+        write!(f, "Global checksum: {:04x}\n", self.global_checksum)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -285,20 +303,6 @@ pub fn global_checksum(rom: &[u8]) -> u16 {
     c -= Wrapping(rom[0x014E] as u16);
     c -= Wrapping(rom[0x014F] as u16);
     return c.0;
-}
-
-pub fn print_header(header_info: &HeaderInfo) {
-    println!("ROM Title: {}", header_info.title);
-    println!("Color Gameboy compatibility: {:?}", header_info.cgb);
-    println!("License: {:?}", header_info.license);
-    println!("Cartridge type:    {:?}", header_info.cart_type);
-    println!("Memory controller: {:?}", header_info.mem_controller);
-    println!("Rom banks: {}", header_info.rom_banks);
-    println!("Ram banks: {}", header_info.ram_banks);
-    println!("Ram size:  {} KB", header_info.ram_size / 1000);
-    println!("Destination: {:?}", header_info.destination);
-    println!("Checksum:  {:02x}", header_info.checksum);
-    println!("Global checksum: {:04x}", header_info.global_checksum);
 }
 
 //#[cfg_attr(rustfmt, rustfmt_skip)]
