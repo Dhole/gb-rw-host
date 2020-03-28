@@ -107,7 +107,9 @@ mod rpc {
         (7, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
         (8, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
         (9, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
-        (10, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo))
+        (10, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
+        (11, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
+        (12, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo))
     }
 }
 
@@ -192,16 +194,27 @@ fn main() {
                     SubCommand::with_name("write-rom")
                         .about("write Gameboy Flash ROM")
                         .arg(
-                            Arg::with_name("noerase")
-                                .help("Don't erase flash")
-                                .long("noerase")
-                                .short("n"),
+                            Arg::with_name("erase")
+                                .help("Flash erase mode: skip, sector, full")
+                                .long("erase")
+                                .short("e")
+                                .value_name("MODE")
+                                .default_value("full")
+                                .takes_value(true)
+                                .required(false)
+                                .validator(|mode| match mode.as_str() {
+                                    "skip" => Ok(()),
+                                    "sector" => Ok(()),
+                                    "full" => Ok(()),
+                                    mode => Err(format!("Invalid erase mode: {}", mode)),
+                                }),
                         )
                         .arg(arg_file.clone()),
                     SubCommand::with_name("write-ram")
                         .about("write Gameboy RAM")
                         .arg(arg_file.clone()),
                     SubCommand::with_name("erase").about("erase Gameboy Flash ROM"),
+                    SubCommand::with_name("flash-info").about("Gameboy Flash chip info"),
                     SubCommand::with_name("read")
                         .about("read Gameboy ROM test")
                         .arg(arg_file.clone()),
@@ -454,6 +467,12 @@ fn progress_bar_finish<T: io::Write>(
     );
 }
 
+enum EraseMode {
+    Skip,
+    Sector,
+    Full,
+}
+
 impl<S: io::Read + io::Write> Gb<S, ()> {
     fn new(mut rpc_client: rpc::Client<S>) -> Result<Self, Error> {
         rpc_client.mode(rpc::ReqMode::GB)?;
@@ -569,6 +588,20 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
         Ok(self.rpc_cli.gb_write_word((0x0000, 0x00))?)
     }
 
+    // Returns (Manufacturer ID, Device ID)
+    fn flash_info(&mut self) -> Result<(u8, u8), Error> {
+        // for (addr, data) in [(0x0AAA, 0xA9), (0x0555, 0x56), (0x0AAA, 0x90)].iter() {
+        //     self.rpc_cli.gb_write_word((*addr, *data))?;
+        // }
+        // let (_, buf) = self.rpc_cli.gb_read((0x0000, 1))?;
+        // let manufacturer_id = buf[0];
+        // let (_, buf) = self.rpc_cli.gb_read((0x0002, 1))?;
+        // let device_id = buf[0];
+        // // self.rpc_cli.gb_write_word((0x0000, 0xFF))?; // Reset
+        // Ok((manufacturer_id, device_id))
+        Ok(self.rpc_cli.gb_flash_info(())?)
+    }
+
     fn flash_erase(&mut self) -> Result<(), Error> {
         let start = Instant::now();
         self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, 1)?;
@@ -613,7 +646,39 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
         Ok(())
     }
 
-    fn flash_write(&mut self, rom: &[u8], erase: bool) -> Result<(), Error> {
+    fn flash_erase_sector(&mut self, addr: u16) -> Result<(), Error> {
+        let writes = vec![
+            (0x0AAA, 0xA9),
+            (0x0555, 0x56),
+            (0x0AAA, 0x80),
+            (0x0AAA, 0xA9),
+            (0x0555, 0x56),
+            (addr, 0x30),
+        ];
+
+        for (addr, data) in writes {
+            self.rpc_cli.gb_write_word((addr, data))?;
+        }
+
+        loop {
+            thread::sleep(Duration::from_millis(100));
+            let (_, buf) = self.rpc_cli.gb_read((addr, 1))?;
+            if buf[0] == 0xFF {
+                break;
+            }
+            if buf[0] != 0x4c && buf[0] != 0x08 {
+                return Err(Error::Generic(format!(
+                    "Received incorrect erasing status 0x{:02x}, check the cartridge connection",
+                    buf[0]
+                )));
+            }
+        }
+        // self.rpc_cli.gb_write_word((0x0000, 0xFF))?; // Reset
+
+        Ok(())
+    }
+
+    fn flash_write(&mut self, rom: &[u8], erase: EraseMode) -> Result<(), Error> {
         let info = self.load_info(rom)?;
         match info.mem_controller {
             MemController::None => (),
@@ -631,9 +696,10 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
             }
         }
 
-        if erase {
+        if let EraseMode::Full = erase {
             self.flash_erase()?;
         }
+        const SECTOR_SIZE: u16 = 0x2000;
 
         let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
         let mut pb = new_progress_bar(n as u64);
@@ -643,6 +709,11 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                 self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, bank)?;
             }
             let addr = if bank == 0 { 0x0000 } else { ROM_BANK_SIZE };
+            if let EraseMode::Sector = erase {
+                for i in 0..ROM_BANK_SIZE / SECTOR_SIZE {
+                    self.flash_erase_sector(addr + i * SECTOR_SIZE)?;
+                }
+            }
             let rom_pos = (bank as usize * ROM_BANK_SIZE as usize);
             let mut i = 0;
             loop {
@@ -1002,7 +1073,13 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                 (("write-rom", Some(app)), File::Read(path, content)) => {
                     let mut gb = Gb::new(rpc_client)?;
                     info!("Writing {} into cartridge ROM", path.display());
-                    gb.flash_write(&content, !app.is_present("noerase"))
+                    let erase_mode = match app.value_of("erase").unwrap() {
+                        "skip" => EraseMode::Skip,
+                        "sector" => EraseMode::Sector,
+                        "full" => EraseMode::Full,
+                        _ => unreachable!(),
+                    };
+                    gb.flash_write(&content, erase_mode)
                 }
                 (("write-ram", _), File::Read(path, content)) => {
                     let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
@@ -1013,6 +1090,12 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                     let mut gb = Gb::new(rpc_client)?;
                     info!("Erasing flash");
                     gb.flash_erase()
+                }
+                (("flash-info", _), _) => {
+                    let mut gb = Gb::new(rpc_client)?;
+                    let (manufacturer_id, device_id) = gb.flash_info()?;
+                    info!("Manufacturer ID: 0x{:02x}, Device ID: 0x{:02x}", manufacturer_id, device_id);
+                    Ok(())
                 }
                 ((cmd, _), _) => {
                     Err(Error::Generic(format!("Unexpected subcommand: {}", cmd)))
