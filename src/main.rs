@@ -94,6 +94,12 @@ mod rpc {
         GBA,
     }
 
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    pub struct GBStats {
+        flash_write_retries: u64,
+        flash_write_errors: u64,
+    }
+
     rpc_client_io! {
         Client;
         client_requests;
@@ -110,7 +116,8 @@ mod rpc {
         (10, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
         (11, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
         (12, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
-        (13, gba_read, GBARead((u32, u16), OptBufNo, (), OptBufYes))
+        (13, gba_read, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
+        (14, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo))
     }
 }
 
@@ -799,6 +806,9 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
         }
         let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
         progress_bar_finish(&mut pb, "Flashing ROM", n, start.elapsed());
+
+        let stats = self.rpc_cli.gb_get_stats(())?.unwrap();
+        info!("{:?}", stats);
 
         Ok(())
     }
