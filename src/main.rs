@@ -760,7 +760,9 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
         if let EraseMode::Full = erase {
             self.flash_erase()?;
         }
-        const SECTOR_SIZE: u16 = 0x2000;
+        const SECTOR_SIZE_0: usize = 0x2000;
+        const SECTOR_SIZE_1: usize = 0x10000;
+        const SECTOR_SIZE_1_ADDR: usize = 0x10000;
 
         let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
         let mut pb = new_progress_bar(n as u64);
@@ -770,12 +772,34 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                 self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, bank)?;
             }
             let addr = if bank == 0 { 0x0000 } else { ROM_BANK_SIZE };
+            let rom_pos = bank as usize * ROM_BANK_SIZE as usize;
             if let EraseMode::Sector = erase {
-                for i in 0..ROM_BANK_SIZE / SECTOR_SIZE {
-                    self.flash_erase_sector(addr + i * SECTOR_SIZE)?;
+                let sector_size = if rom_pos < SECTOR_SIZE_1_ADDR {
+                    SECTOR_SIZE_0
+                } else {
+                    SECTOR_SIZE_1
+                };
+                let sector_addrs = if sector_size < ROM_BANK_SIZE as usize {
+                    (0..ROM_BANK_SIZE as usize / sector_size)
+                        .map(|i| (addr + (i * sector_size) as u16, rom_pos + i * sector_size))
+                        .collect()
+                } else {
+                    if rom_pos % sector_size == 0 {
+                        vec![(addr, rom_pos)]
+                    } else {
+                        vec![]
+                    }
+                };
+                for (sector_vaddr, sector_addr) in sector_addrs {
+                    let ok = self.rpc_cli.gb_flash_erase_sector(sector_vaddr)?;
+                    if !ok {
+                        warn!(
+                            "gb_flash_erase sector error at address 0x{:04x} (vaddr: 0x{:04x})",
+                            sector_addr, sector_vaddr
+                        );
+                    }
                 }
             }
-            let rom_pos = (bank as usize * ROM_BANK_SIZE as usize);
             let mut i = 0;
             loop {
                 let fail = self.rpc_cli.gb_flash_write(
