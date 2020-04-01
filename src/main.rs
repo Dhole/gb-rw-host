@@ -100,6 +100,11 @@ mod rpc {
         flash_write_errors: u64,
     }
 
+    #[derive(Debug, PartialEq, Serialize)]
+    pub enum FlashType {
+        F3 = 3,
+    }
+
     rpc_client_io! {
         Client;
         client_requests;
@@ -117,7 +122,12 @@ mod rpc {
         (11, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
         (12, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
         (13, gba_read, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
-        (14, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo))
+        (14, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
+        (15, gba_write_word, GBAWriteWord((u32, u16), OptBufNo, (), OptBufNo)),
+        (16, gba_flash_write, GBAFlashWrite((FlashType, u32), OptBufYes, Option<u32>, OptBufNo)),
+        (17, gba_flash_unlock_sector, GBAFlashUnlockSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+        (18, gba_flash_erase_sector, GBAFlashEraseSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+        (255, test1, Test((), OptBufNo, Option<[(u16, u16); 8]>, OptBufNo)) // 1
     }
 }
 
@@ -187,9 +197,14 @@ fn main() {
         .arg(
             Arg::with_name("no-reset")
                 .help("Don't reset the development board")
-                .short("n"),
+                .short("n")
+                .long("no-reset"),
         )
         .subcommands(vec![
+            SubCommand::with_name("debug")
+                .about("Device debug functions")
+                .subcommands(vec![SubCommand::with_name("ping").about("Ping device")])
+                .subcommands(vec![SubCommand::with_name("gba-test").about("GBA test")]),
             SubCommand::with_name("gb")
                 .about("Gameboy functions")
                 .subcommands(vec![
@@ -251,8 +266,8 @@ fn main() {
                         ),
                     SubCommand::with_name("read-test").about("read Gameboy Advance ROM test"),
                     SubCommand::with_name("write-test").about("write Gameboy Advance ROM test"),
-                    SubCommand::with_name("write-rom-test")
-                        .about("write Gameboy Advance ROM test")
+                    SubCommand::with_name("write-rom")
+                        .about("write Gameboy Advance ROM")
                         .arg(arg_file.clone()),
                 ]),
         ]);
@@ -381,6 +396,14 @@ struct Gba<S: io::Read + io::Write> {
     rpc_cli: rpc::Client<S>,
 }
 
+// macro_rules! retry_on_timeout {
+//     ($n:expr, $call:expr) => {
+//         for 0..4 {
+//             $call()
+//         }
+//     };
+// }
+
 impl<S: io::Read + io::Write> Gba<S> {
     fn new(mut rpc_client: rpc::Client<S>) -> Result<Self, Error> {
         rpc_client.mode(rpc::ReqMode::GBA)?;
@@ -413,6 +436,11 @@ impl<S: io::Read + io::Write> Gba<S> {
         Err(Error::Generic(format!("Unable to guess gba rom size")))
     }
 
+    fn read_word(&mut self, addr: u32) -> Result<u16, Error> {
+        let (_, buf) = self.rpc_cli.gba_read((addr, 2))?;
+        Ok(u16::from_le_bytes([buf[0], buf[1]]))
+    }
+
     fn read(&mut self, mut file: &fs::File, size: Option<u32>) -> Result<(), Error> {
         // let (_, buf) = self.rpc_cli.gba_read((0x00_00_00_00, 0x4000))?;
         // print_hex(&buf[..0x100], 0);
@@ -440,61 +468,260 @@ impl<S: io::Read + io::Write> Gba<S> {
         Ok(())
     }
 
-    // fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Error> {
-    //     self.dev
-    //         .send(&cmd_gba_read(addr, addr + buf.len() as u32))?;
-    //     self.dev.recv(&mut buf[..])?;
-    //     self.dev.wait_cmd_ack()
-    // }
+    fn test1(&mut self) -> Result<(), Error> {
+        let (_, buf) = self.rpc_cli.gba_read((0, 0x40))?;
+        print_hex(&buf, 0);
 
-    // fn read_word(&mut self, addr: u32) -> Result<u16, Error> {
-    //     let mut buf = [0; 2];
-    //     self.read(addr, &mut buf[..])?;
-    //     Ok(u16::from_le_bytes(buf))
-    // }
+        let w = self.read_word(0)?;
+        println!("0 w: {:04x}", w);
+        let w = self.read_word(2)?;
+        println!("2 w: {:04x}", w);
 
-    // fn write_word(&mut self, addr: u32, data: u16) -> Result<(), Error> {
-    //     self.dev.send(&cmd_gba_write(addr, data))?;
-    //     self.dev.wait_cmd_ack()
-    // }
+        let result = self.rpc_cli.test1(())?.unwrap();
+        for (w0, w2) in result.iter() {
+            println!("0 w: {:04x} 2 w: {:04x}", w0, w2); // 8815
+        }
+        let (_, buf) = self.rpc_cli.gba_read((0, 0x40))?;
+        print_hex(&buf, 0);
 
-    // fn flash_unlock_sector(&mut self, flash_type: FlashType, sector: u32) -> Result<(), Error> {
-    //     match flash_type {
-    //         FlashType::F3 => {
-    //             self.write_word(sector, 0xff)?;
-    //             self.write_word(sector, 0x60)?;
-    //             self.write_word(sector, 0xd0)?;
-    //             self.write_word(sector, 0x90)?;
+        let w = self.read_word(0)?;
+        println!("0 w: {:04x}", w);
+        let w = self.read_word(2)?;
+        println!("2 w: {:04x}", w);
 
-    //             while self.read_word(sector + 2)? & 0x03 != 0x00 {}
-    //             Ok(())
-    //         }
-    //     }
-    // }
+        self.rpc_cli.gba_write_word((0, 0xff))?; // reset
 
-    // fn flash_erase_sector(&mut self, flash_type: FlashType, sector: u32) -> Result<(), Error> {
-    //     match flash_type {
-    //         FlashType::F3 => {
-    //             self.write_word(sector, 0xff)?;
-    //             self.write_word(sector, 0x20)?;
-    //             self.write_word(sector, 0xd0)?;
-    //             while self.read_word(sector)? != 0x80 {
-    //                 thread::sleep(Duration::from_millis(100));
-    //             }
-    //             self.write_word(sector, 0xff)?;
-    //             Ok(())
-    //         }
-    //     }
-    // }
+        let (_, buf) = self.rpc_cli.gba_read((0, 0x40))?;
+        print_hex(&buf, 0);
 
-    // fn flash_write(&mut self, flash_type: FlashType, addr: u32, data: &[u8]) -> Result<(), Error> {
-    //     self.dev.send(&cmd_gba_flash_write(
-    //         addr,
-    //         addr + data.len() as u32,
-    //         flash_type,
-    //     ))?;
-    //     self.dev.send(data)?;
-    //     self.dev.wait_cmd_ack()
+        let w = self.read_word(0)?;
+        println!("0 w: {:04x}", w);
+        let w = self.read_word(2)?;
+        println!("2 w: {:04x}", w);
+
+        self.rpc_cli.gba_write_word((0, 0xff))?; // reset
+        Ok(())
+    }
+
+    fn test2(&mut self) -> Result<(), Error> {
+        // let w = self.read_word(0x8000002)?;
+        // println!("1a w: {:04x}", w); // 8815
+
+        // let w = self.read_word(0x8000000)?;
+        // println!("0a w: {:02x}", (w & 0x00ff) as u8); // 8a
+
+        // self.rpc_cli.gba_write_word((0x8000000, 0xff))?;
+        // self.rpc_cli.gba_write_word((0x8000000, 0x50))?;
+        // self.rpc_cli.gba_write_word((0x8000000, 0x90))?;
+
+        // let w = self.read_word(0x8000000)?;
+        // println!("0b w: {:02x}", (w & 0x00ff) as u8); // 8a
+
+        // // if (*0x8000000 != 0x8a) {
+        // //   *0x8000000 = 0xf0;
+        // //   return 2; // r0 = 2; goto 0x08f80380;
+        // // }
+        // let w = self.read_word(0x8000002)?;
+        // println!("1a w: {:04x}", w); // 8815
+
+        // self.rpc_cli.gba_write_word((0x8000000, 0xff))?;
+        // self.rpc_cli.gba_write_word((0x8000000, 0x90))?;
+
+        // let w = self.read_word(0x8000002)?;
+        // println!("1b w: {:04x}", w); // 8815
+
+        // self.rpc_cli.gba_write_word((0x8000002, 0xff))?;
+
+        // switch (*0x8000002) {
+        // case 0x8815:
+        // case 0x8810:
+        // case 0x880e:
+        //   *0x8000002 = 0xff;
+        //   return 3 // r0 = 3; goto 0x08f80380;
+        // case 0x887d:
+        // case 0x88b0:
+        //   *0x8000002 = 0xff;
+        //   return 1; // r0 = 1; goto 0x08f80380;
+        // case 0x227d:
+        // default:
+        //   *0x8000002 = 0xf0;
+        //   return 2; // r0 = 2; goto 0x08f80380;
+        //   break;
+        // }
+
+        info!("Unlocking sector...");
+        let ok = self
+            .rpc_cli
+            .gba_flash_unlock_sector((rpc::FlashType::F3, 0))?;
+        if !ok {
+            return Err(Error::Generic(format!("gba_flash_unlock_sector failed")));
+        }
+        info!("Erasing sector...");
+        let ok = self
+            .rpc_cli
+            .gba_flash_erase_sector((rpc::FlashType::F3, 0))?;
+        if !ok {
+            return Err(Error::Generic(format!("gba_flash_erase_sector failed")));
+        }
+
+        let fail = self.rpc_cli.gba_flash_write(
+            (rpc::FlashType::F3, 0),
+            &[0xd, 0xe, 0xa, 0xd, 0xb, 0xe, 0xe, 0xf],
+        )?;
+        info!("Fail: {:?}", fail);
+
+        let (_, buf) = self.rpc_cli.gba_read((0, 0x200))?;
+        print_hex(&buf, 0);
+        Ok(())
+    }
+
+    fn flash_write(&mut self, rom: &[u8]) -> Result<(), Error> {
+        const SECTOR_SIZE: usize = 0x8000;
+        if rom.len() % SECTOR_SIZE != 0 {
+            return Err(Error::Generic(format!(
+                "Rom length is not multiple of sector size ({}), it's: {:?}",
+                SECTOR_SIZE,
+                rom.len()
+            )));
+        }
+
+        let mut pb = new_progress_bar(rom.len() as u64);
+        let start = Instant::now();
+        for i in 0..rom.len() / SECTOR_SIZE {
+            let sector = (i as u32) * (SECTOR_SIZE as u32);
+            let ok = self
+                .rpc_cli
+                .gba_flash_unlock_sector((rpc::FlashType::F3, sector))?;
+            if !ok {
+                return Err(Error::Generic(format!(
+                    "flash unlock sector failed at sector 0x{:06}",
+                    sector
+                )));
+            }
+
+            for attempt in 0..4 {
+                if i < 4 || i % 4 == 0 {
+                    let ok = self
+                        .rpc_cli
+                        .gba_flash_erase_sector((rpc::FlashType::F3, sector))?;
+                    if !ok {
+                        return Err(Error::Generic(format!(
+                            "flash erase sector failed at sector 0x{:06}",
+                            sector
+                        )));
+                    }
+                }
+                let rom_sector = &rom[sector as usize..sector as usize + SECTOR_SIZE];
+                if rom_sector.iter().all(|b| *b == 0xff) {
+                    break;
+                }
+                match self
+                    .rpc_cli
+                    .gba_flash_write((rpc::FlashType::F3, sector), rom_sector)?
+                {
+                    None => {}
+                    Some(addr) => {
+                        return Err(Error::Generic(format!(
+                            "flash write failed at address 0x{:06}",
+                            addr
+                        )));
+                    }
+                }
+                let (_, buf) = self.rpc_cli.gba_read((sector, SECTOR_SIZE as u16))?;
+                if &buf[..] == rom_sector {
+                    break;
+                }
+                println!(
+                    "Sector {:08x} check didn't pass, flashing it again...",
+                    sector
+                );
+                println!("=== Expected ===");
+                print_hex(
+                    &rom[sector as usize..sector as usize + 0x100],
+                    sector as u32,
+                );
+                println!();
+                println!("=== Got ===");
+                print_hex(&buf[..0x100], sector as u32);
+                println!();
+                if attempt == 3 {
+                    return Err(Error::Generic(format!(
+                        "Sector {:08x} check didn't pass after 4 write attempts",
+                        sector
+                    )));
+                }
+            }
+            pb.add(SECTOR_SIZE as u64);
+        }
+
+        progress_bar_finish(&mut pb, "Flashing ROM", rom.len(), start.elapsed());
+
+        // let stats = self.rpc_cli.gb_get_stats(())?.unwrap();
+        // info!("{:?}", stats);
+        Ok(())
+    }
+
+    fn flash_unlock_sector(
+        &mut self,
+        flash_type: rpc::FlashType,
+        sector: u32,
+    ) -> Result<(), Error> {
+        match flash_type {
+            rpc::FlashType::F3 => {
+                let w = self.read_word(sector + 2)?;
+                println!("a w: {:02x}", (w & 0x00ff) as u8);
+
+                self.rpc_cli.gba_write_word((sector, 0xff))?;
+                self.rpc_cli.gba_write_word((sector, 0x60))?;
+                self.rpc_cli.gba_write_word((sector, 0xd0))?;
+                self.rpc_cli.gba_write_word((sector, 0x90))?;
+
+                info!("Waiting for flash unlock...");
+                let w = self.read_word(sector + 2)?;
+                println!("b w: {:02x}", (w & 0x00ff) as u8);
+                let w = self.read_word(sector + 2)?;
+                println!("b w: {:02x}", (w & 0x00ff) as u8);
+                let w = self.read_word(sector + 2)?;
+                println!("b w: {:02x}", (w & 0x00ff) as u8);
+                // while self.read_word(sector + 2)? & 0x03 != 0x00 {}
+                Ok(())
+            }
+        }
+    }
+
+    fn flash_erase_sector(&mut self, flash_type: rpc::FlashType, sector: u32) -> Result<(), Error> {
+        match flash_type {
+            rpc::FlashType::F3 => {
+                let w = self.read_word(sector)?;
+                println!("a w: {:02x}", (w & 0x00ff) as u8);
+
+                self.rpc_cli.gba_write_word((sector, 0xff))?;
+                self.rpc_cli.gba_write_word((sector, 0x20))?;
+                self.rpc_cli.gba_write_word((sector, 0xd0))?;
+
+                let w = self.read_word(sector)?;
+                println!("a w: {:02x}", (w & 0x00ff) as u8);
+                let w = self.read_word(sector)?;
+                println!("a w: {:02x}", (w & 0x00ff) as u8);
+                let w = self.read_word(sector)?;
+                println!("a w: {:02x}", (w & 0x00ff) as u8);
+                while self.read_word(sector)? != 0x80 {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                self.rpc_cli.gba_write_word((sector, 0xff))?;
+                Ok(())
+            }
+        }
+    }
+
+    // fn flash_write(
+    //     &mut self,
+    //     flash_type: rpc::FlashType,
+    //     addr: u32,
+    //     data: &[u8],
+    // ) -> Result<(), Error> {
+    //     self.rpc_cli.gba_flash_write((flash_type, addr), &data)?;
+    //     Ok(())
     // }
 }
 
@@ -821,14 +1048,9 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                     break;
                 }
             }
-            // if !ok {
-            //     return Err(Error::Generic(format!(
-            //         "gb_flash_write write byte polling timeout"
-            //     )));
-            // }
             pb.add(ROM_BANK_SIZE as u64);
         }
-        let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
+        // let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
         progress_bar_finish(&mut pb, "Flashing ROM", n, start.elapsed());
 
         let stats = self.rpc_cli.gb_get_stats(())?.unwrap();
@@ -1143,9 +1365,29 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
     };
 
     // let mut rpc_client = client::RpcClient::new();
-    let mut rpc_client = rpc::Client::new(device, 0x4100);
+    let mut rpc_client = rpc::Client::new(device, 0x8100);
 
     let result = match matches.subcommand() {
+        ("debug", Some(app)) => match app.subcommand() {
+            ("ping", _) => {
+                let ping = [1, 2, 3, 4];
+                let pong = rpc_client.ping(ping)?;
+                if pong != ping {
+                    Err(Error::Generic(format!(
+                        "Ping sent {:?}, got {:?}",
+                        ping, pong
+                    )))
+                } else {
+                    info!("ping({:?}) -> pong({:?})", ping, pong);
+                    Ok(())
+                }
+            }
+            ("gba-test", _) => {
+                let mut gba = Gba::new(rpc_client)?;
+                gba.test2()
+            }
+            _ => unreachable!(),
+        },
         ("gb", Some(app)) => {
             match (app.subcommand(), &file) {
                 (("read-rom", _), File::Write(path, file)) => {
@@ -1202,6 +1444,11 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                     // gba.read(file, size, Memory::Rom)
                     gba.read(file, size)
                     // gba_read_rom(&mut Gba::new(device)?, &file, size)
+                }
+                (("write-rom", Some(_app)), File::Read(path, content)) => {
+                    let mut gba = Gba::new(rpc_client)?;
+                    info!("Writing {} into cartridge ROM", path.display());
+                    gba.flash_write(&content)
                 }
                 // ("read-test", Some(_)) => {
                 //     unimplemented!()
