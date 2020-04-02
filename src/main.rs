@@ -18,25 +18,20 @@ extern crate zip;
 
 extern crate gb_rw_host;
 
-use std::io::{self, ErrorKind};
-// use std::io::{BufReader, BufWriter};
 use std::cmp;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 use std::process::{self, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use urpc::{
-    client::{self, RpcClientIOError},
-    consts, OptBufNo, OptBufYes,
-};
+use urpc::client::{self, RpcClientIOError};
 
 use bufstream::BufStream;
 use clap::{App, Arg, ArgMatches, SubCommand};
 use log::{error, info, warn};
-use num::iter::range_step;
 use pbr::{ProgressBar, Units};
 use serial::prelude::*;
 use std::io::prelude::*;
@@ -109,24 +104,20 @@ mod rpc {
         Client;
         client_requests;
         (0, ping, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
-        (1, send_bytes, SendBytes((), OptBufYes, (), OptBufNo)),
-        (2, add, Add((u8, u8), OptBufNo, u8, OptBufNo)),
-        (3, recv_bytes, RecvBytes((), OptBufNo, (), OptBufYes)),
-        (4, send_recv, SendRecv((), OptBufYes, (), OptBufYes)),
-        (5, gb_read, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
-        (6, mode, Mode(ReqMode, OptBufNo, bool, OptBufNo)),
-        (7, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
-        (8, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
-        (9, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
-        (10, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
-        (11, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
-        (12, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
-        (13, gba_read, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
-        (14, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
-        (15, gba_write_word, GBAWriteWord((u32, u16), OptBufNo, (), OptBufNo)),
-        (16, gba_flash_write, GBAFlashWrite((FlashType, u32), OptBufYes, Option<u32>, OptBufNo)),
-        (17, gba_flash_unlock_sector, GBAFlashUnlockSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
-        (18, gba_flash_erase_sector, GBAFlashEraseSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+        (1, mode, Mode(ReqMode, OptBufNo, bool, OptBufNo)),
+        (2, gb_read, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
+        (3, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
+        (4, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
+        // (5, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
+        (6, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
+        (7, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
+        (8, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
+        (9, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
+        (50, gba_read, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
+        (51, gba_write_word, GBAWriteWord((u32, u16), OptBufNo, (), OptBufNo)),
+        (52, gba_flash_write, GBAFlashWrite((FlashType, u32), OptBufYes, Option<u32>, OptBufNo)),
+        (53, gba_flash_unlock_sector, GBAFlashUnlockSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+        (54, gba_flash_erase_sector, GBAFlashEraseSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
         (255, test1, Test((), OptBufNo, Option<[(u16, u16); 8]>, OptBufNo)) // 1
     }
 }
@@ -403,14 +394,6 @@ impl<T: SerialPort> io::Write for Device<T> {
 struct Gba<S: io::Read + io::Write> {
     rpc_cli: rpc::Client<S>,
 }
-
-// macro_rules! retry_on_timeout {
-//     ($n:expr, $call:expr) => {
-//         for 0..4 {
-//             $call()
-//         }
-//     };
-// }
 
 impl<S: io::Read + io::Write> Gba<S> {
     fn new(mut rpc_client: rpc::Client<S>) -> Result<Self, Error> {
@@ -740,16 +723,6 @@ impl<S: io::Read + io::Write> Gba<S> {
             }
         }
     }
-
-    // fn flash_write(
-    //     &mut self,
-    //     flash_type: rpc::FlashType,
-    //     addr: u32,
-    //     data: &[u8],
-    // ) -> Result<(), Error> {
-    //     self.rpc_cli.gba_flash_write((flash_type, addr), &data)?;
-    //     Ok(())
-    // }
 }
 
 struct Gb<S: io::Read + io::Write, I> {
@@ -905,15 +878,6 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
 
     // Returns (Manufacturer ID, Device ID)
     fn flash_info(&mut self) -> Result<(u8, u8), Error> {
-        // for (addr, data) in [(0x0AAA, 0xA9), (0x0555, 0x56), (0x0AAA, 0x90)].iter() {
-        //     self.rpc_cli.gb_write_word((*addr, *data))?;
-        // }
-        // let (_, buf) = self.rpc_cli.gb_read((0x0000, 1))?;
-        // let manufacturer_id = buf[0];
-        // let (_, buf) = self.rpc_cli.gb_read((0x0002, 1))?;
-        // let device_id = buf[0];
-        // // self.rpc_cli.gb_write_word((0x0000, 0xFF))?; // Reset
-        // Ok((manufacturer_id, device_id))
         Ok(self.rpc_cli.gb_flash_info(())?)
     }
 
@@ -1077,7 +1041,6 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
             }
             pb.add(ROM_BANK_SIZE as u64);
         }
-        // let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
         progress_bar_finish(&mut pb, "Flashing ROM", n, start.elapsed());
 
         let stats = self.rpc_cli.gb_get_stats(())?.unwrap();
@@ -1391,7 +1354,6 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
         FilePath::None => File::None,
     };
 
-    // let mut rpc_client = client::RpcClient::new();
     let mut rpc_client = rpc::Client::new(device, 0x8100);
 
     let result = match matches.subcommand() {
@@ -1415,102 +1377,74 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
             }
             _ => unreachable!(),
         },
-        ("gb", Some(app)) => {
-            match (app.subcommand(), &file) {
-                (("read-rom", _), File::Write(path, file)) => {
-                    let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
-                    info!("Reading cartridge ROM into {}", path.display());
-                    gb.read(file, Memory::Rom)
-                }
-                (("read-ram", _), File::Write(path, file)) => {
-                    let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
-                    info!("Reading cartridge ROM into {}", path.display());
-                    gb.read(file, Memory::Ram)
-                }
-                (("write-rom", Some(app)), File::Read(path, content)) => {
-                    let mut gb = Gb::new(rpc_client)?;
-                    info!("Writing {} into cartridge ROM", path.display());
-                    let erase_mode = match app.value_of("erase").unwrap() {
-                        "skip" => EraseMode::Skip,
-                        "sector" => EraseMode::Sector,
-                        "full" => EraseMode::Full,
-                        _ => unreachable!(),
-                    };
-                    gb.flash_write(&content, erase_mode)
-                }
-                (("write-ram", _), File::Read(path, content)) => {
-                    let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
-                    info!("Writing {} into cartridge RAM", path.display());
-                    gb.write_ram(&content)
-                }
-                (("erase", _), _) => {
-                    let mut gb = Gb::new(rpc_client)?;
-                    info!("Erasing flash");
-                    gb.flash_erase()
-                }
-                (("flash-info", _), _) => {
-                    let mut gb = Gb::new(rpc_client)?;
-                    let (manufacturer_id, device_id) = gb.flash_info()?;
-                    info!(
-                        "Manufacturer ID: 0x{:02x}, Device ID: 0x{:02x}",
-                        manufacturer_id, device_id
-                    );
-                    Ok(())
-                }
-                ((cmd, _), _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
-                // UPDATE
-                // ("read", Some(_)) => read_test(&mut port),
+        ("gb", Some(app)) => match (app.subcommand(), &file) {
+            (("read-rom", _), File::Write(path, file)) => {
+                let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
+                info!("Reading cartridge ROM into {}", path.display());
+                gb.read(file, Memory::Rom)
             }
-        }
-        ("gba", Some(app)) => {
-            match (app.subcommand(), &file) {
-                (("read-rom", Some(app)), File::Write(path, file)) => {
-                    let mut gba = Gba::new(rpc_client)?;
-                    info!("Reading cartridge ROM into {}", path.display());
-                    let size = app.value_of("size").map(|s| s.parse::<u32>().unwrap());
-                    // gba.read(file, size, Memory::Rom)
-                    gba.read(file, size)
-                    // gba_read_rom(&mut Gba::new(device)?, &file, size)
-                }
-                (("write-rom", Some(app)), File::Read(path, content)) => {
-                    let diff = match app.value_of("diff") {
-                        Some(diff_path) => {
-                            let mut content = Vec::new();
-                            fs::OpenOptions::new()
-                                .read(true)
-                                .open(diff_path)?
-                                .read_to_end(&mut content)?;
-                            Some(content)
-                        }
-                        None => None,
-                    };
-                    let mut gba = Gba::new(rpc_client)?;
-                    info!("Writing {} into cartridge ROM", path.display());
-                    gba.flash_write(&content, diff)
-                }
-                // ("read-test", Some(_)) => {
-                //     unimplemented!()
-                //     // println!("Reading GBA cartridge ROM into stdout");
-                //     // gba_read_test(&mut Gba::new(device)?)
-                // }
-                //("write-test", Some(_)) => {
-                //    unimplemented!()
-                //    // println!("Writing and reading GBA cartridge data, showing result in stdout");
-                //    // gba_write_test(&mut Gba::new(device)?)
-                //}
-                //("write-ROM-test", Some(_)) => {
-                //    unimplemented!()
-                //    // println!("Writing {} into cartridge GBA ROM", path.display());
-                //    // let mut rom = Vec::new();
-                //    // OpenOptions::new()
-                //    //     .read(true)
-                //    //     .open(path)?
-                //    //     .read_to_end(&mut rom)?;
-                //    // write_gba_rom_test(&mut Gba::new(device)?, &rom)
-                //}
-                ((cmd, _), _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
+            (("read-ram", _), File::Write(path, file)) => {
+                let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
+                info!("Reading cartridge ROM into {}", path.display());
+                gb.read(file, Memory::Ram)
             }
-        }
+            (("write-rom", Some(app)), File::Read(path, content)) => {
+                let mut gb = Gb::new(rpc_client)?;
+                info!("Writing {} into cartridge ROM", path.display());
+                let erase_mode = match app.value_of("erase").unwrap() {
+                    "skip" => EraseMode::Skip,
+                    "sector" => EraseMode::Sector,
+                    "full" => EraseMode::Full,
+                    _ => unreachable!(),
+                };
+                gb.flash_write(&content, erase_mode)
+            }
+            (("write-ram", _), File::Read(path, content)) => {
+                let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
+                info!("Writing {} into cartridge RAM", path.display());
+                gb.write_ram(&content)
+            }
+            (("erase", _), _) => {
+                let mut gb = Gb::new(rpc_client)?;
+                info!("Erasing flash");
+                gb.flash_erase()
+            }
+            (("flash-info", _), _) => {
+                let mut gb = Gb::new(rpc_client)?;
+                let (manufacturer_id, device_id) = gb.flash_info()?;
+                info!(
+                    "Manufacturer ID: 0x{:02x}, Device ID: 0x{:02x}",
+                    manufacturer_id, device_id
+                );
+                Ok(())
+            }
+            ((cmd, _), _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
+        },
+        ("gba", Some(app)) => match (app.subcommand(), &file) {
+            (("read-rom", Some(app)), File::Write(path, file)) => {
+                let mut gba = Gba::new(rpc_client)?;
+                info!("Reading cartridge ROM into {}", path.display());
+                let size = app.value_of("size").map(|s| s.parse::<u32>().unwrap());
+                gba.read(file, size)
+            }
+            (("write-rom", Some(app)), File::Read(path, content)) => {
+                let diff = match app.value_of("diff") {
+                    Some(diff_path) => {
+                        let mut content = Vec::new();
+                        fs::OpenOptions::new()
+                            .read(true)
+                            .open(diff_path)?
+                            .read_to_end(&mut content)?;
+                        Some(content)
+                    }
+                    None => None,
+                };
+                let mut gba = Gba::new(rpc_client)?;
+                info!("Writing {} into cartridge ROM", path.display());
+                gba.flash_write(&content, diff)
+            }
+            ((cmd, _), _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
+        },
         (cmd, _) => Err(Error::Generic(format!("Unexpected subcommand: {}", cmd))),
     };
 
@@ -1522,373 +1456,3 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
     }
     result
 }
-
-// fn gba_read_rom<T: SerialPort>(
-//     gba: &mut Gba<T>,
-//     mut file: &fs::File,
-//     size: Option<u32>,
-// ) -> Result<(), Error> {
-//     let size = match size {
-//         None => {
-//             let s = guess_gba_rom_size(gba)?;
-//             info!("Guessed ROM size: {}MB ({}MBits)", s, s * 8);
-//             s
-//         }
-//         Some(s) => s,
-//     };
-//
-//     let buf_len = 0x8000 as u32;
-//     let mut buf = vec![0; buf_len as usize];
-//     let end: u32 = size * 1024 * 1024;
-//     let mut pb = ProgressBar::new(end as u64);
-//     pb.set_units(Units::Bytes);
-//     pb.format("[=> ]");
-//     for addr in range_step(0x00_00_00_00, end, buf_len) {
-//         gba.read(addr, &mut buf)?;
-//         file.write_all(&buf)?;
-//         pb.add(buf_len as u64);
-//     }
-//     pb.finish_print("Reading ROM finished");
-//     Ok(())
-// }
-//
-// fn gba_read_test<T: SerialPort>(gba: &mut Gba<T>) -> Result<(), Error> {
-//     let buf_len = 0x100;
-//     let mut buf = vec![0; 0x800000];
-//     //for addr_start in range_step(0x1_00_00_00, 0x1_01_00_00, buf_len) {
-//     //for addr_start in range_step(0x0, 0x4000 * 1, buf_len) {
-//     let start = 0x0000;
-//     for addr_start in range_step(start, start + buf_len * 1, buf_len) {
-//         let addr_end = addr_start + buf_len;
-//         //// READ_GBA_ROM
-//         gba.read(addr_start, &mut buf[..(addr_end - addr_start) as usize])?;
-//         //// READ_GBA_WORD
-//         // for addr in (addr_start..addr_end).step_by(2) {
-//         //     run_cmd(port, cmd_gba_read_word(addr).as_slice())?;
-//         //     let mut word_le: [u8; 2] = [0, 0];
-//         //     port.read_exact(&mut word_le[..])?;
-//         //     wait_cmd_ack(port)?;
-//         //     buf[addr as usize] = word_le[0];
-//         //     buf[addr as usize + 1] = word_le[1];
-//         // }
-//
-//         println!("=== {:08x} - {:08x} ===", addr_start, addr_end);
-//         // print_hex(&buf[addr_start as usize..addr_end as usize], addr_start);
-//         print_hex(&buf[..(addr_end - addr_start) as usize], addr_start);
-//         println!();
-//     }
-//     Ok(())
-// }
-
-fn gba_write_test<T: SerialPort>(gba: &mut Gba<T>) -> Result<(), Error> {
-    // port.write_all(cmd_gba_write(0x000000, 0xf0f0).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_write(0x000154, 0x9898).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_read(0x000040, 0x000042).as_slice())?;
-    // port.flush()?;
-
-    // port.read_exact(&mut buf)?;
-    // println!("* read(0x000040) = {:02x}{:02x}", buf[0], buf[1]);
-
-    // port.write_all(cmd_gba_write(0x000000, 0x00ff).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_write(0x0000aa, 0x0098).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_write(0x000000, 0xf0f0).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_write(0x0000aa, 0x9898).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_read(0x000020, 0x000022).as_slice())?;
-    // port.flush()?;
-
-    // port.read_exact(&mut buf)?;
-    // println!("* read(0x000020) = {:02x}{:02x}", buf[0], buf[1]);
-
-    // port.write_all(cmd_gba_write(0x000000, 0xf0f0).as_slice())?;
-    // port.flush()?;
-    // port.write_all(cmd_gba_write(0x000154, 0x9898).as_slice())?;
-    // port.flush()?;
-
-    // // *0x8000040 != 0x5152
-    // // *0x8000020 != 0x5152
-
-    // port.write_all(cmd_gba_write(0x000000, 0x00f0).as_slice())?;
-    // port.flush()?;
-
-    // port.write_all(cmd_gba_write(0x000000, 0x00ff).as_slice())?;
-    // port.flush()?;
-    // port.write_all(cmd_gba_write(0x000000, 0x0050).as_slice())?;
-    // port.flush()?;
-    // port.write_all(cmd_gba_write(0x000000, 0x0090).as_slice())?;
-    // port.flush()?;
-
-    // *0x8000000 == 0x8a
-
-    // port.write_all(cmd_gba_write(0x000000, 0x00ff).as_slice())?;
-    // port.flush()?;
-    // port.write_all(cmd_gba_write(0x000000, 0x0090).as_slice())?;
-    // port.flush()?;
-
-    // *0x8000002 == 0x8810 -> 3
-
-    // Disable ID mode
-    // port.write_all(cmd_gba_write(0x000002, 0x00ff).as_slice())?;
-    // port.flush()?;
-
-    let sector = 0x0000;
-
-    //// Erase 0x8000 bytes sector
-
-    // Guess: Unlock sector
-    /*
-    println!("DBG Unlock sector");
-    bus_gba_write(port, sector, 0xff)?;
-    bus_gba_write(port, sector, 0x60)?;
-    bus_gba_write(port, sector, 0xd0)?;
-    bus_gba_write(port, sector, 0x90)?;
-
-    for _ in 0..32 {
-        let v = bus_gba_read_word(port, sector + 2)?;
-        println!("1 read({:08x}) = {:04x}", sector + 2, v);
-        if v & 0x03 == 0 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    // Erase sector
-    println!("DBG Erase sector");
-    bus_gba_write(port, sector, 0xff)?;
-    bus_gba_write(port, sector, 0x20)?;
-    bus_gba_write(port, sector, 0xd0)?;
-
-    loop {
-        let v = bus_gba_read_word(port, sector)?;
-        println!("2 read({:08x}) = {:04x}", sector, v);
-        if v == 0x80 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    bus_gba_write(port, sector, 0xff)?;
-    */
-
-    // gba_flash_a_unlock_sector(port, 0 * 0x8000)?;
-    // gba_flash_a_erase_sector(port, 0 * 0x8000)?;
-    // for i in 0..5 {
-    //     gba_flash_a_unlock_sector(port, i * 0x8000)?;
-    //     gba_flash_a_erase_sector(port, i * 0x8000)?;
-    //     println!("Erased sector {:08x}", i * 0x8000);
-    // }
-    // let data = vec![0, 1];
-    // for i in 0..4 {
-    //     bus_gba_flash_write(port, 0x20000 + i * 0x8000, &data, FlashType::F3)?;
-    // }
-
-    // gba.flash_unlock_sector(FlashType::F3, 0xfc0000)?;
-    // gba.flash_erase_sector(FlashType::F3, 0xfc0000)?;
-    // gba.flash_unlock_sector(FlashType::F3, 0xfc1000)?;
-    // gba.flash_erase_sector(FlashType::F3, 0xfc1000)?;
-
-    //// Write data
-    // let sector = 0x0000;
-
-    //let data = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
-    //let data = [0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88];
-    // let data = [0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc];
-    // let data = [0xee, 0xee, 0xcc, 0xcc, 0xaa, 0xaa, 0x99, 0x99];
-    // let data = [0x00, 0x0f, 0xf0, 0xff];
-    // let data = [0xff, 0xf0, 0x0f, 0x00];
-    // let data = [0xde, 0xad, 0xbe, 0xef];
-    // let mut data = vec![0; 2];
-    // for i in 0..data.len() {
-    //     data[i] = i as u8;
-    // }
-    // let data = vec![0, 1];
-
-    // let word = bus_gba_read_word(port, sector)?;
-    // println!("Before: {:08x} : {:04x}", sector, word);
-
-    // println!("DBG Write flash F3 data");
-    // bus_gba_flash_write(port, sector, &data, FlashType::F3)?;
-
-    // let word = bus_gba_read_word(port, sector)?;
-    // println!("After: {:08x} : {:04x}", sector, word);
-    /*
-    for i in 0..data.len() / 2 {
-        println!("Write byte");
-        let addr = sector + (i * 2) as u32;
-        bus_gba_write(port, addr, 0xff)?;
-        bus_gba_write(port, addr, 0x70)?;
-
-        loop {
-            let v = bus_gba_read_word(port, addr)?;
-            println!("3 read({:08x}) = {:04x}", addr, v);
-            if v == 0x80 {
-                break;
-            }
-            // thread::sleep(Duration::from_millis(50));
-        }
-
-        bus_gba_write(port, addr, 0xff)?;
-        bus_gba_write(port, addr, 0x40)?;
-
-        let w = (data[i * 2] as u16) | ((data[i * 2 + 1] as u16) << 8);
-        println!("4 write({:08x}) = {:04x}", addr, w);
-        bus_gba_write(port, addr, w)?;
-
-        loop {
-            let v = bus_gba_read_word(port, addr)?;
-            println!("4 read({:08x}) = {:04x}", addr, v);
-            if v == 0x80 {
-                break;
-            }
-            // thread::sleep(Duration::from_millis(50));
-        }
-    }
-    bus_gba_write(port, sector, 0xff)?;
-    */
-
-    // for (i = 0; i < 0x8000; i++) {
-    //   *r2 = 0xff;
-    //   *r2 = 0x70;
-
-    //   while (*r2 != 0x80);
-
-    //   *r2 = 0xff;
-    //   *r2 = 0x40;
-
-    //   *r2 = (u16) *r5;
-    //   while (*r2 != 0x80);
-
-    //   r2 +=2
-    //   r5 +=2
-    // }
-
-    // *r2 = 0xff;
-
-    Ok(())
-}
-
-// fn write_gba_rom_test<T: SerialPort>(gba: &mut Gba<T>, rom: &[u8]) -> Result<(), Error> {
-//     let sec_len: usize = 0x8000;
-//     if rom.len() % sec_len != 0 {
-//         return Err(Error::Generic(format!(
-//             "Rom length is not multiple of sector length ({}), it's: {:?}",
-//             sec_len,
-//             rom.len()
-//         )));
-//     }
-//
-//     /*
-//     let mut pb = ProgressBar::new(rom.len() as u64);
-//     pb.set_units(Units::Bytes);
-//     pb.format("[=> ]");
-//     for i in 0..rom.len() / sec_len {
-//         let sector = (i as u32) * (sec_len as u32);
-//         gba_flash_a_unlock_sector(port, sector)?;
-//         gba_flash_a_erase_sector(port, sector)?;
-//         pb.add(sec_len as u64);
-//     }
-//     pb.finish_print("Erasing ROM finished");
-//     // thread::sleep(Duration::from_millis(1000));
-//     */
-//
-//     // let mut buf = vec![0; sec_len];
-//     let mut buf = vec![0; 0x100];
-//     // let mut buf2 = vec![0; 0x10];
-//     let mut pb = ProgressBar::new(rom.len() as u64);
-//     pb.set_units(Units::Bytes);
-//     pb.format("[=> ]");
-//     for i in 0..rom.len() / sec_len {
-//         let sector = (i as u32) * (sec_len as u32);
-//         // println!("DBG Unlock");
-//         // gba_flash_a_unlock_sector(port, sector)?; // DBG
-//         gba.flash_unlock_sector(FlashType::F3, sector)?;
-//         for attempt in 0..4 {
-//             if i < 4 || i % 4 == 0 {
-//                 gba.flash_erase_sector(FlashType::F3, sector)?;
-//             }
-//             let rom_sector = &rom[sector as usize..sector as usize + sec_len];
-//             // if rom_sector.iter().all(|b| *b == 0x00) || rom_sector.iter().all(|b| *b == 0xff) {
-//             if rom_sector.iter().all(|b| *b == 0xff) {
-//                 break;
-//             }
-//             // println!("DBG flash write");
-//             gba.flash_write(FlashType::F3, sector, rom_sector)?;
-//             gba.read(sector, &mut buf)?;
-//             if buf[..] == rom[sector as usize..sector as usize + buf.len()] {
-//                 break;
-//             }
-//             println!(
-//                 "Sector {:08x} check didn't pass, flashing it again...",
-//                 sector
-//             );
-//             println!("=== Expected ===");
-//             print_hex(
-//                 &rom[sector as usize..sector as usize + 0x100],
-//                 sector as u32,
-//             );
-//             println!();
-//             println!("=== Got ===");
-//             print_hex(&buf[..0x100], sector as u32);
-//             println!();
-//             if attempt == 3 {
-//                 return Err(Error::Generic(format!(
-//                     "Sector {:08x} check didn't pass after 4 write attempts",
-//                     sector
-//                 )));
-//             }
-//         }
-//         pb.add(sec_len as u64);
-//         // Check that previous sectors were not erased!
-//         // for j in 0..i {
-//         //     let sector2 = (j as u32) * (sec_len as u32);
-//         //     bus_gba_read(port, sector2, sector2 + 0x10 as u32, &mut buf2)?;
-//         //     if buf2[..] != rom[sector2 as usize..sector2 as usize + 0x10] {
-//         //         println!(
-//         //             "While writing sector {:08x}, sector {:08x} was erased!",
-//         //             sector, sector2
-//         //         );
-//         //         println!("=== Expected ===");
-//         //         print_hex(
-//         //             &rom[sector2 as usize..sector2 as usize + 0x10],
-//         //             sector2 as u32,
-//         //         );
-//         //         println!();
-//         //         println!("=== Got ===");
-//         //         print_hex(&buf2[..0x10], sector2 as u32);
-//         //         println!();
-//         //     } else {
-//         //         println!("sector {:08x} is good!", sector2);
-//         //     }
-//         // }
-//     }
-//     pb.finish_print("Writing ROM finished");
-//
-//     Ok(())
-// }
-//
-// fn guess_gba_rom_size<T: SerialPort>(gba: &mut Gba<T>) -> Result<u32, Error> {
-//     let mut buf = vec![0; 0x08];
-//     for size in vec![32, 16, 8, 4] {
-//         for end in vec![size, size - size / 4] {
-//             let addr_end = end * 1024 * 1024;
-//             let addr_start = addr_end - 0x08;
-//             gba.read(addr_start, &mut buf)?;
-//
-//             if buf != vec![0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20] {
-//                 return Ok(size);
-//             }
-//         }
-//     }
-//     Err(Error::Generic(format!("Unable to guess gba rom size")))
-// }
