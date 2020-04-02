@@ -146,7 +146,7 @@ fn main() {
         .takes_value(true)
         .required(true);
     let mut app = App::new("gb-rw")
-        .version("0.1")
+        .version("0.2")
         .about("Gameboy cartridge read/writer")
         .author("Dhole")
         .arg(

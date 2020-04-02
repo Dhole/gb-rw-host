@@ -1,6 +1,6 @@
 [package]
 name = "gb-rw-host"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Dhole <dhole@openmailbox.org>"]
 # edition = "2018"
 
