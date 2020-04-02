@@ -268,7 +268,15 @@ fn main() {
                     SubCommand::with_name("write-test").about("write Gameboy Advance ROM test"),
                     SubCommand::with_name("write-rom")
                         .about("write Gameboy Advance ROM")
-                        .arg(arg_file.clone()),
+                        .arg(arg_file.clone())
+                        .arg(
+                            Arg::with_name("diff")
+                                .help("When flashing, only writte the sectors that differ from this file")
+                                .short("d")
+                                .long("diff")
+                                .value_name("FILE")
+                                .takes_value(true)
+                        ),
                 ]),
         ]);
     let matches = app.clone().get_matches();
@@ -575,7 +583,7 @@ impl<S: io::Read + io::Write> Gba<S> {
         Ok(())
     }
 
-    fn flash_write(&mut self, rom: &[u8]) -> Result<(), Error> {
+    fn flash_write(&mut self, rom: &[u8], diff: Option<Vec<u8>>) -> Result<(), Error> {
         const SECTOR_SIZE: usize = 0x8000;
         if rom.len() % SECTOR_SIZE != 0 {
             return Err(Error::Generic(format!(
@@ -583,6 +591,15 @@ impl<S: io::Read + io::Write> Gba<S> {
                 SECTOR_SIZE,
                 rom.len()
             )));
+        }
+        if let Some(diff_rom) = &diff {
+            if diff_rom.len() != rom.len() {
+                return Err(Error::Generic(format!(
+                    "Diff rom differs from rom: {} != {}",
+                    diff_rom.len(),
+                    rom.len()
+                )));
+            }
         }
 
         let mut pb = new_progress_bar(rom.len() as u64);
@@ -598,7 +615,18 @@ impl<S: io::Read + io::Write> Gba<S> {
                     sector
                 )));
             }
+            if let Some(diff_rom) = &diff {
+                let sector = sector / 4 * 4;
+                let end = std::cmp::min(sector as usize + SECTOR_SIZE * 4, rom.len());
+                let rom_4sectors = &rom[sector as usize..end];
+                let diff_4sectors = &diff_rom[sector as usize..end];
+                if diff_4sectors == rom_4sectors {
+                    pb.add(SECTOR_SIZE as u64);
+                    continue;
+                }
+            }
 
+            let rom_sector = &rom[sector as usize..sector as usize + SECTOR_SIZE];
             for attempt in 0..4 {
                 if i < 4 || i % 4 == 0 {
                     let ok = self
@@ -611,7 +639,6 @@ impl<S: io::Read + io::Write> Gba<S> {
                         )));
                     }
                 }
-                let rom_sector = &rom[sector as usize..sector as usize + SECTOR_SIZE];
                 if rom_sector.iter().all(|b| *b == 0xff) {
                     break;
                 }
@@ -1445,10 +1472,21 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                     gba.read(file, size)
                     // gba_read_rom(&mut Gba::new(device)?, &file, size)
                 }
-                (("write-rom", Some(_app)), File::Read(path, content)) => {
+                (("write-rom", Some(app)), File::Read(path, content)) => {
+                    let diff = match app.value_of("diff") {
+                        Some(diff_path) => {
+                            let mut content = Vec::new();
+                            fs::OpenOptions::new()
+                                .read(true)
+                                .open(diff_path)?
+                                .read_to_end(&mut content)?;
+                            Some(content)
+                        }
+                        None => None,
+                    };
                     let mut gba = Gba::new(rpc_client)?;
                     info!("Writing {} into cartridge ROM", path.display());
-                    gba.flash_write(&content)
+                    gba.flash_write(&content, diff)
                 }
                 // ("read-test", Some(_)) => {
                 //     unimplemented!()
