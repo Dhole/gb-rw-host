@@ -1,22 +1,14 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+mod header;
+mod utils;
+
 #[macro_use]
 extern crate urpc;
 
 #[macro_use]
 extern crate enum_primitive;
-extern crate bufstream;
-extern crate clap;
-extern crate log;
-extern crate num;
-extern crate pbr;
-extern crate serde;
-extern crate serial;
-extern crate time;
-extern crate zip;
-
-extern crate gb_rw_host;
 
 use std::cmp;
 use std::ffi::OsStr;
@@ -37,7 +29,8 @@ use serial::prelude::*;
 use std::io::prelude::*;
 use zip::{read::ZipArchive, result::ZipError};
 
-use gb_rw_host::{header::*, utils::*};
+use crate::{header::*, utils::*};
+// use gb_rw_host::{header::*, utils::*};
 
 #[derive(Debug)]
 pub enum Error {

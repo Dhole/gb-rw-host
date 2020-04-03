@@ -2,7 +2,7 @@ use num::FromPrimitive;
 use std::fmt;
 use std::num::Wrapping;
 
-use utils;
+use crate::utils;
 
 pub const ROM_BANK_SIZE: u16 = 0x4000;
 pub const RAM_BANK_SIZE: u16 = 0x2000;

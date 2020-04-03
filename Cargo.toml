@@ -2,7 +2,7 @@
 name = "gb-rw-host"
 version = "0.2.0"
 authors = ["Dhole <dhole@openmailbox.org>"]
-# edition = "2018"
+edition = "2018"
 
 [dependencies]
 serial = "0.4"
