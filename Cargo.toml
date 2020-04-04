@@ -18,7 +18,8 @@ log = "0.4"
 env_logger = "0.7.1"
 
 [dependencies.urpc]
-path = "/home/dev/git/urpc"
+version = "0.1.0-alpha.2"
+# path = "/home/dev/git/urpc"
 
 [dependencies.serde]
 version = "1.0.102"
