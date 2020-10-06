@@ -26,6 +26,21 @@ You can read more about how reprogramming Game Boy Chinese cartridge works in my
 This program also uses my [`uRPC` library](https://github.com/Dhole/urpc)
 (client side) to communicate with the microcontroller via UART.
 
+## Dependencies
+
+The reset functionality (enabled by default, disabled with the global flag
+`--no-reset`) requires the comand line utility `st-flash`.
+
+Debian install:
+```
+sudo apt install stlink-tools
+```
+
+Arch install:
+```
+sudo pacman -S stlink
+```
+
 ## Usage
 
 Main subcommands
@@ -90,6 +105,17 @@ SUBCOMMANDS:
     read-rom      read Gameboy Advance ROM
     write-rom     write Gameboy Advance ROM
 ```
+
+## Quirks
+
+When I started this project, I wrote the firmware in C.  For better
+reliability, I added a global flag (enabled by default) to reset the
+microcontroller before running the subcommand itself.
+
+Afterwards I rewrote the firmware in Rust, and updated the host program
+accordingly.  Currently, the reset feature doesn't play well with the firware,
+so if you encounter any urpc errors, try disabling the resset by setting the
+global flag `--no-reset`.
 
 ## License
 
