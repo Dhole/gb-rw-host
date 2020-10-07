@@ -88,9 +88,11 @@ mod rpc {
         flash_write_errors: u64,
     }
 
-    #[derive(Debug, PartialEq, Serialize)]
+    #[derive(Debug, PartialEq, Serialize, Clone, Copy)]
     pub enum FlashType {
-        F3 = 3,
+        Generic = 0,
+        F3 = 1,
+        Bf53 = 2,
     }
 
     rpc_client_io! {
@@ -102,7 +104,7 @@ mod rpc {
         (3, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
         (4, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
         // (5, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
-        (6, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
+        (6, gb_flash_write, GBFlashWrite((FlashType, u16), OptBufYes, Option<(u16, u8)>, OptBufNo)),
         (7, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
         (8, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
         (9, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
@@ -363,10 +365,12 @@ impl<T: SerialPort> Device<T> {
         Ok(())
     }
 
+    /*
     fn mode_gba(&mut self) -> Result<(), Error> {
         self.send(&cmd_mode_gba())?;
         self.wait_cmd_ack()
     }
+    */
 }
 
 impl<T: SerialPort> io::Read for Device<T> {
@@ -689,6 +693,10 @@ impl<S: io::Read + io::Write> Gba<S> {
                 // while self.read_word(sector + 2)? & 0x03 != 0x00 {}
                 Ok(())
             }
+            _ => Err(Error::Generic(format!(
+                "Unexpected flash_type {:?}",
+                flash_type
+            ))),
         }
     }
 
@@ -714,6 +722,10 @@ impl<S: io::Read + io::Write> Gba<S> {
                 self.rpc_cli.gba_write_word((sector, 0xff))?;
                 Ok(())
             }
+            _ => Err(Error::Generic(format!(
+                "Unexpected flash_type {:?}",
+                flash_type
+            ))),
         }
     }
 }
@@ -906,7 +918,7 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                 )));
             }
         }
-        self.rpc_cli.gb_write_word((0x0000, 0xFF))?; // Reset
+        self.flash_reset()?;
 
         let dur = start.elapsed();
         let dur_millis = dur.as_secs() * 1000 + dur.subsec_millis() as u64;
@@ -915,6 +927,12 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
             dur_millis / 1000 / 60,
             (dur_millis / 1000) % 60,
         );
+        Ok(())
+    }
+
+    fn flash_reset(&mut self) -> Result<(), Error> {
+        self.rpc_cli.gb_write_word((0x0000, 0xFF))?; // Reset Generic
+        self.rpc_cli.gb_write_word((0x0000, 0xF0))?; // Reset Bf53
         Ok(())
     }
 
@@ -950,16 +968,25 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
         Ok(())
     }
 
-    fn flash_write(&mut self, rom: &[u8], erase: EraseMode) -> Result<(), Error> {
+    fn flash_write(
+        &mut self,
+        flash_type: Option<rpc::FlashType>,
+        rom: &[u8],
+        erase: EraseMode,
+    ) -> Result<(), Error> {
         let info = self.load_info(rom)?;
         match info.mem_controller {
             MemController::None => (),
             MemController::Mbc1 => {
                 if info.rom_banks > 0x20 {
-                    return Err(Error::Generic(format!(
+                    // return Err(Error::Generic(format!(
+                    //     "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
+                    //     0x1f, info.rom_banks
+                    // )));
+                    warn!(
                         "MBC1 is only MBC5-compatible with max {} banks, but this rom has {} banks",
                         0x1f, info.rom_banks
-                    )));
+                    );
                 }
             }
             MemController::Mbc5 => (),
@@ -967,6 +994,23 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
                 return Err(Error::Generic(format!("{:?} is not MBC5-compatible", mc)));
             }
         }
+
+        let flash_type = match flash_type {
+            Some(ft) => ft,
+            None => {
+                let (manufacturer_id, device_id) = self.flash_info()?;
+                info!(
+                    "Manufacturer ID: 0x{:02x}, Device ID: 0x{:02x}",
+                    manufacturer_id, device_id
+                );
+                let ft = match (manufacturer_id, device_id) {
+                    (0xbf, 0x53) => rpc::FlashType::Bf53,
+                    _ => rpc::FlashType::Generic,
+                };
+                info!("Detected flash_type: {:?}", ft);
+                ft
+            }
+        };
 
         if let EraseMode::Full = erase {
             self.flash_erase()?;
@@ -978,7 +1022,7 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
         let n = info.rom_banks as usize * ROM_BANK_SIZE as usize;
         let mut pb = new_progress_bar(n as u64);
         let start = Instant::now();
-        for bank in 0..info.rom_banks {
+        for bank in 0..cmp::min((rom.len() / ROM_BANK_SIZE as usize) as u16, info.rom_banks) {
             if bank != 0 {
                 self.switch_bank_mc(&MemController::Mbc5, &Memory::Rom, bank)?;
             }
@@ -1014,8 +1058,9 @@ impl<S: io::Read + io::Write, I> Gb<S, I> {
             let mut i = 0;
             loop {
                 let fail = self.rpc_cli.gb_flash_write(
-                    addr + i,
-                    &rom[rom_pos + i as usize..rom_pos + ROM_BANK_SIZE as usize],
+                    (flash_type, addr + i),
+                    &rom[rom_pos + i as usize
+                        ..cmp::min(rom.len(), rom_pos + ROM_BANK_SIZE as usize)],
                 )?;
                 if let Some((fail_addr, fail_byte)) = fail {
                     warn!(
@@ -1130,6 +1175,7 @@ impl<S: io::Read + io::Write> Gb<S, HeaderInfo> {
     }
 }
 
+/*
 enum_from_primitive! {
 #[derive(Debug, PartialEq)]
 enum FlashType {
@@ -1172,7 +1218,9 @@ enum ReplyCmd {
     Nack,
 }
 }
+*/
 
+/*
 fn cmd_mode_gba() -> [u8; 1] {
     [Cmd::ModeGBA as u8]
 }
@@ -1225,6 +1273,7 @@ fn cmd_gba_flash_write(addr_start: u32, addr_end: u32, flash_type: FlashType) ->
         flash_type as u8,
     ]
 }
+*/
 
 enum FilePath<'a> {
     Read(&'a str),
@@ -1390,7 +1439,7 @@ fn run_subcommand(matches: ArgMatches) -> Result<(), Error> {
                     "full" => EraseMode::Full,
                     _ => unreachable!(),
                 };
-                gb.flash_write(&content, erase_mode)
+                gb.flash_write(None, &content, erase_mode)
             }
             (("write-ram", _), File::Read(path, content)) => {
                 let mut gb = Gb::new(rpc_client)?.with_info_cart()?;
